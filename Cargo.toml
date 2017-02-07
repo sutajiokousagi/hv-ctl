@@ -1,0 +1,10 @@
+[package]
+name = "hv-ctl"
+version = "0.1.0"
+authors = ["bunnie"]
+
+[dependencies]
+cupi = "*"
+cupi_shift = "*"
+libc = "*"
+quick-error = "*"
