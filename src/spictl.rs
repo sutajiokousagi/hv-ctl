@@ -4,6 +4,9 @@ use cupi::{CuPi, delay_ms, DigitalWrite};
 use cupi::PinOutput;
 
 const DAC_RST_N: usize = 25;
+const HV_FULL_SCALE: f64 = 200.0;  // is 1000.0 for production
+const HV_GAIN: f64 = (HV_FULL_SCALE / 12.0);
+const VREF: f64 = 0.6;
 
 fn create_spi() -> io::Result<Spidev> {
     let mut spi = try!(Spidev::open("/dev/spidev0.1"));
@@ -65,6 +68,8 @@ impl HvSet {
             hvset.spi.transfer(&mut transfer).unwrap();
         }
 
+        delay_ms(2);
+        
         Ok(hvset)
     }
 
@@ -100,11 +105,19 @@ impl HvSet {
         return retval
     }
 
-    /*  // placeholder -- eventually, specify a target in volts, not as a DAC code
-    pub fn setHvTarget(&mut self, voltage: u16) {
-        
+    pub fn set_hv_target(&mut self, voltage: u16) -> u16 {
+        // Vout = gain * vref * (DAC-R / 5100 + 1)
+        // DAC-R = code * (100_000 / 1024)
+        // Vout = gain * vref * ((code * (100_000 / 1024)) / 5100 + 1)
+        // Vout / (gain * vref) - 1 = (code * (100_000 / 1024)) / 5100
+        // (Vout / (gain * vref) - 1) * 5100 = (code * (100_000 / 1024))
+        // ((Vout / (gain * vref) - 1) * 5100) * (1024 / 100_000) = code
+        let code: u16 = ((((voltage as f64) / (HV_GAIN * VREF) - 1.0) * 5100.0) * (1024.0 / 100_000.0)) as u16;
+        self.set_code( code );
+
+        return code;
     }
-     */
+
 }
 
 impl Drop for HvSet {

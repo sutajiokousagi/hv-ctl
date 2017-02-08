@@ -21,6 +21,8 @@ extern crate quick_error;
 use cupi::CuPi;
 use cupi::delay_ms;
 
+use std::process;
+
 //const BRD_MOSI: usize = ;
 //const BRD_MISO: usize = ;
 //const BRD_CLK: usize = ;
@@ -107,6 +109,14 @@ fn main() {
     delay_ms(100);
 
     let mut hvset = HvSet::new(&cupi).unwrap();
-    println!("Code set to {}", hvset.set_code(16));
     
+    let target: u16 = 20;
+    let code: u16 = hvset.set_hv_target(target);
+    let resistance: f64 = (code as f64) * (100_000.0 / 1024.0);
+    let lv: f64 = 0.6 * ((resistance / 5100.0) + 1.0);
+    let hv: f64 = lv * (200.0 / 12.0); // 200.0 for initial testing, 1000,0 for production based on HV supply
+    println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", target, code, resistance, lv, hv );
+
+    process::exit(0);
+//    panic!("hard exitting.");
 }
