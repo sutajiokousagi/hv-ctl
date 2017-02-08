@@ -1,5 +1,6 @@
 extern crate cupi;
 extern crate cupi_shift;
+extern crate spidev;
 
 mod system;
 
@@ -8,6 +9,9 @@ use slewrate::*;
 
 mod hvctl;
 use hvctl::*;
+
+mod spictl;
+use spictl::*;
 
 #[macro_use]
 extern crate quick_error;
@@ -23,40 +27,41 @@ use cupi::delay_ms;
 //const BRD_ADC_CS_N: usize = ;
 //const BRD_DAC_CS_N: usize = ;
 
-fn main() {
+#[test]
+fn testlights() {
     let cupi = CuPi::new().unwrap();
 
     let mut hvcfg = HvConfig::new(cupi).unwrap();
     
     slewrate().unwrap();
 
-    // light validation loop
-    loop {
+    // four iterations; replace with "loop" if you want it to go forever
+    for _ in 0..3 {
         println!("control on");
-        hvcfg.update_ctl(0xFF, HvEngage::HvGenOff);
+        hvcfg.update_ctl(0xFF, HvLockout::HvGenOff);
         delay_ms(500);
 
         println!("lockout toggle");
-        hvcfg.update_ctl(0xFF, HvEngage::HvGenOn);
+        hvcfg.update_ctl(0xFF, HvLockout::HvGenOn);
         delay_ms(500);
-        hvcfg.update_ctl(0xFF, HvEngage::HvGenOff);
+        hvcfg.update_ctl(0xFF, HvLockout::HvGenOff);
         delay_ms(500);
         
         println!("walk control");
         let mut shift_val = 1;
         for _ in 0..8 {
-            hvcfg.update_ctl(shift_val, HvEngage::HvGenOff);
+            hvcfg.update_ctl(shift_val, HvLockout::HvGenOff);
             shift_val <<= 1;
             delay_ms(500);
         }
         println!("control off");
-        hvcfg.update_ctl(0, HvEngage::HvGenOff);
+        hvcfg.update_ctl(0, HvLockout::HvGenOff);
         delay_ms(500);
 
         println!("lockout toggle, voff");
-        hvcfg.update_ctl(0x00, HvEngage::HvGenOn);
+        hvcfg.update_ctl(0x00, HvLockout::HvGenOn);
         delay_ms(500);
-        hvcfg.update_ctl(0x00, HvEngage::HvGenOff);
+        hvcfg.update_ctl(0x00, HvLockout::HvGenOff);
         delay_ms(500);
 
         println!("row walk");
@@ -74,6 +79,33 @@ fn main() {
         delay_ms(500);
         hvcfg.update_colsel(ColSel::ColNone);
         delay_ms(500);
+
+        println!("specific control");
+        hvcfg.update_ctl(HvCtl::HvEngage as u8 |
+                         HvCtl::HvgenEna as u8 |
+                         HvCtl::SelLocap as u8 |
+                         HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
+        delay_ms(1000);
         
+        println!("control off");
+        hvcfg.update_ctl(0, HvLockout::HvGenOff);
     }
+}
+
+fn main() {
+    let cupi = CuPi::new().unwrap();
+
+    let mut hvcfg = HvConfig::new(&cupi).unwrap();
+    slewrate().unwrap();
+
+    // set control state to off/safe
+    println!("Set control state to safe");
+    hvcfg.update_ctl(0, HvLockout::HvGenOff);
+    hvcfg.update_rowsel(RowSel::RowNone);
+    hvcfg.update_colsel(ColSel::ColNone);
+
+    delay_ms(100);
+
+    test_spi(&cupi);
+    
 }

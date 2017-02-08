@@ -14,14 +14,14 @@ const BRD_LOCKOUT_N: usize = 29;
 enum_from_primitive! {
     #[derive(Debug, PartialEq, Copy, Clone)]
     pub enum HvCtl {
-        HvEngage =    0b10000000,
-        HvgenEna =    0b01000000,
-        Sel300Ohm =   0b00100000,
-        Sel620Ohm =   0b00010000,
-        Sel750Ohm =   0b00001000,
-        Sel1000Ohm =  0b00000100,
-        SelHicap =    0b00000010,
-        SelLocap =    0b00000001,
+        HvEngage =    0b1000_0000,
+        HvgenEna =    0b0100_0000,
+        Sel300Ohm =   0b0010_0000,
+        Sel620Ohm =   0b0001_0000,
+        Sel750Ohm =   0b0000_1000,
+        Sel1000Ohm =  0b0000_0100,
+        SelHicap =    0b0000_0010,
+        SelLocap =    0b0000_0001,
     }
 }
 
@@ -44,8 +44,8 @@ enum_from_primitive! {
     #[derive(Debug, PartialEq, Copy, Clone)]
     pub enum RowSel {
         RowNone = 0,
-        RowSel1 = 0b10000000,
-        RowSel2 = 0b01000000,
+        RowSel1 = 0b1000_0000,
+        RowSel2 = 0b0100_0000,
     }
 }
 
@@ -63,8 +63,8 @@ enum_from_primitive! {
     #[derive(Debug, PartialEq, Copy, Clone)]
     pub enum ColSel {
         ColNone = 0,
-        ColSel1 = 0b10000000,
-        ColSel2 = 0b01000000,
+        ColSel1 = 0b1000_0000,
+        ColSel2 = 0b0100_0000,
     }
 }
 
@@ -80,24 +80,24 @@ impl fmt::Display for ColSel {
 
 enum_from_primitive! {
     #[derive(Debug, PartialEq, Copy, Clone)]
-    pub enum HvEngage {
+    pub enum HvLockout {
         HvGenOn = 1,
         HvGenOff = 0,
     }
 }
 
-impl fmt::Display for HvEngage {
+impl fmt::Display for HvLockout {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            HvEngage::HvGenOn => write!(f, "HV generator on"),
-            HvEngage::HvGenOff => write!(f, "HV generator off"),
+            HvLockout::HvGenOn => write!(f, "HV generator allowed to be on"),
+            HvLockout::HvGenOff => write!(f, "HV locked out"),
         }
     }
 }
 
 #[derive(Debug)]
 pub enum HvErr {
-    None,
+//    None,
 }
 
 pub struct HvConfig {
@@ -111,7 +111,7 @@ pub struct HvConfig {
 }
 
 impl HvConfig {
-    pub fn new(cupi: CuPi) -> Result<HvConfig,HvErr> {
+    pub fn new(cupi: &CuPi) -> Result<HvConfig,HvErr> {
         let (data_pin, latch_pin, clock_pin) = (BRD_SRDOUT, BRD_RCLK, BRD_SRCLK);
         let mut hvcfg = HvConfig {
             initialized: true,
@@ -143,9 +143,9 @@ impl HvConfig {
         }
     }
 
-    pub fn update_ctl(&mut self, val: u8, hvon: HvEngage) {
+    pub fn update_ctl(&mut self, val: u8, hvon: HvLockout) {
         self.shifter.set(self.hvsel, val as usize, true);
-        if hvon == HvEngage::HvGenOn {
+        if hvon == HvLockout::HvGenOn {
             self.pin_lockout_n.high().unwrap();
         } else {
             self.pin_lockout_n.low().unwrap();

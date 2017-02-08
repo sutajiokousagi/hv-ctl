@@ -10,3 +10,5 @@ libc = "*"
 quick-error = "*"
 enum_primitive = "*"
 num = "*"
+spidev = "*"
+
