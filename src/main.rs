@@ -106,6 +106,7 @@ fn main() {
 
     delay_ms(100);
 
-    test_spi(&cupi);
+    let mut hvset = HvSet::new(&cupi).unwrap();
+    println!("Code set to {}", hvset.set_code(16));
     
 }
