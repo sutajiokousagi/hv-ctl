@@ -128,7 +128,7 @@ fn main() {
                              HvCtl::SelLocap as u8 |
                              HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
         } else if target == 2 {
-            println!("ADC read: {}", adc.read());
+            println!("HV measured: {}", adc.read_hv());
         } else if target == 5 {
             process::exit(0);
         } else {

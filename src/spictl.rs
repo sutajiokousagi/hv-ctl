@@ -29,6 +29,7 @@ fn create_adc() -> io::Result<Spidev> {
 pub struct AdcRead {
     initialized: bool,
     spi: Spidev,
+    hv_gain: f64,
 }
 
 impl AdcRead {
@@ -36,6 +37,7 @@ impl AdcRead {
         let mut adc = AdcRead {
             initialized: true,
             spi: create_adc().unwrap(),
+            hv_gain: 0.59120,  // this should become a parameter later on
         };
         
         Ok(adc)
@@ -47,7 +49,8 @@ impl AdcRead {
         }
     }
 
-    pub fn read(&mut self) -> u16 {
+    // returns the ADC code
+    pub fn read_code(&mut self) -> u16 {
         let tx_buf = [0; 2];
         let mut rx_buf = [0; 2];
         {
@@ -59,6 +62,13 @@ impl AdcRead {
         let retval: u16 = ((rx_buf[0] & 0x1f) as u16) << 7 | (((rx_buf[1] & 0xfe) as u16) >> 1);
 
         return retval
+    }
+
+    // returns the estimated HV input
+    pub fn read_hv(&mut self) -> f64 {
+        let read_voltage = (self.read_code() as f64) * self.hv_gain;
+
+        return read_voltage
     }
 }
 
