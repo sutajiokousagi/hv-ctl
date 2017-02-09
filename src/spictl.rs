@@ -82,6 +82,24 @@ impl HvSet {
     // sets DAC to a given code. Causes top resistor to be (code * (100k / 1024)) ohms
     pub fn set_code(&mut self, code: u16) -> u16 {
         self.hvcode = code;
+        if self.hvcode > 1023 {
+            self.hvcode = 1023;
+        }
+
+        delay_ms(1);
+        let mut tx_buf = [0x18, 0x02];  // unlock RDAC wiper
+        let mut rx_buf = [0; 2];
+        {
+            let mut transfer = SpidevTransfer::read_write(&tx_buf, &mut rx_buf);
+            self.spi.transfer(&mut transfer).unwrap();
+        }
+
+        tx_buf = [0x20, 0x00];  // power on command
+        {
+            let mut transfer = SpidevTransfer::read_write(&tx_buf, &mut rx_buf);
+            self.spi.transfer(&mut transfer).unwrap();
+        }
+        delay_ms(1);
         
         let mut tx_buf = [(0x04 | (self.hvcode >> 8) & 0xFF) as u8 , (self.hvcode & 0xFF) as u8]; // write command
         let mut rx_buf = [0; 2];
@@ -89,6 +107,7 @@ impl HvSet {
             let mut transfer = SpidevTransfer::read_write(&tx_buf, &mut rx_buf);
             self.spi.transfer(&mut transfer).unwrap();
         }
+        delay_ms(1);
         
         tx_buf = [0x08, 0x00]; // read command
         {
@@ -112,7 +131,16 @@ impl HvSet {
         // Vout / (gain * vref) - 1 = (code * (100_000 / 1024)) / 5100
         // (Vout / (gain * vref) - 1) * 5100 = (code * (100_000 / 1024))
         // ((Vout / (gain * vref) - 1) * 5100) * (1024 / 100_000) = code
-        let code: u16 = ((((voltage as f64) / (HV_GAIN * VREF) - 1.0) * 5100.0) * (1024.0 / 100_000.0)) as u16;
+        let mut v: u16 = voltage;
+        if voltage < 30 {
+            println!("Warning: voltage target less than minimum, setting to 30V");
+            v = 30;
+        }
+        if voltage > HV_FULL_SCALE as u16 {
+            println!("Warning: voltage target greater than full scale, setting to {}", HV_FULL_SCALE);
+            v = HV_FULL_SCALE as u16;
+        }
+        let code: u16 = ((((v as f64) / (HV_GAIN * VREF) - 1.0) * 5100.0) * (1024.0 / 100_000.0)) as u16;
         self.set_code( code );
 
         return code;

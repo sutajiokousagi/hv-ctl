@@ -11,4 +11,4 @@ quick-error = "*"
 enum_primitive = "*"
 num = "*"
 spidev = "*"
-
+text_io = "*"

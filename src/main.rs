@@ -23,11 +23,7 @@ use cupi::delay_ms;
 
 use std::process;
 
-//const BRD_MOSI: usize = ;
-//const BRD_MISO: usize = ;
-//const BRD_CLK: usize = ;
-//const BRD_ADC_CS_N: usize = ;
-//const BRD_DAC_CS_N: usize = ;
+#[macro_use] extern crate text_io;
 
 #[test]
 fn testlights() {
@@ -110,13 +106,43 @@ fn main() {
 
     let mut hvset = HvSet::new(&cupi).unwrap();
     
-    let target: u16 = 20;
-    let code: u16 = hvset.set_hv_target(target);
-    let resistance: f64 = (code as f64) * (100_000.0 / 1024.0);
-    let lv: f64 = 0.6 * ((resistance / 5100.0) + 1.0);
-    let hv: f64 = lv * (200.0 / 12.0); // 200.0 for initial testing, 1000,0 for production based on HV supply
+    let mut target: u16 = 50;
+    let mut code: u16 = hvset.set_hv_target(target);
+    let mut resistance: f64 = (code as f64) * (100_000.0 / 1024.0);
+    let mut lv: f64 = 0.6 * ((resistance / 5100.0) + 1.0);
+    let mut hv: f64 = lv * (200.0 / 12.0); // 200.0 for initial testing, 1000,0 for production based on HV supply
     println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", target, code, resistance, lv, hv );
 
+    let mut engage = false;
+    loop {
+        target = read!("{}");
+        if target == 0 {
+            hvcfg.update_ctl(0, HvLockout::HvGenOff);
+            engage = false;
+        } else if target == 1 {
+            engage = true;
+            hvcfg.update_ctl(HvCtl::HvEngage as u8 |
+                             HvCtl::HvgenEna as u8 |
+                             HvCtl::SelLocap as u8 |
+                             HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
+        } else {
+            if engage {
+                hvcfg.update_ctl(HvCtl::HvEngage as u8 |
+                                 HvCtl::HvgenEna as u8 |
+                                 HvCtl::SelLocap as u8 |
+                                 HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
+            } else {
+                hvcfg.update_ctl(HvCtl::HvgenEna as u8 |
+                                 HvCtl::SelLocap as u8 |
+                                 HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
+            }
+            code = hvset.set_hv_target(target);
+            resistance = (code as f64) * (100_000.0 / 1024.0);
+            lv = 0.6 * ((resistance / 5100.0) + 1.0);
+            hv = lv * (200.0 / 12.0); // 200.0 for initial testing, 1000,0 for production based on HV supply
+            println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", target, code, resistance, lv, hv );
+        }
+    }
     process::exit(0);
-//    panic!("hard exitting.");
+    //    panic!("hard exitting.");
 }
