@@ -113,6 +113,8 @@ fn main() {
     let mut hv: f64 = lv * (200.0 / 12.0); // 200.0 for initial testing, 1000,0 for production based on HV supply
     println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", target, code, resistance, lv, hv );
 
+    let mut adc = AdcRead::new().unwrap();
+    
     let mut engage = false;
     loop {
         target = read!("{}");
@@ -125,6 +127,10 @@ fn main() {
                              HvCtl::HvgenEna as u8 |
                              HvCtl::SelLocap as u8 |
                              HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
+        } else if target == 2 {
+            println!("ADC read: {}", adc.read());
+        } else if target == 5 {
+            process::exit(0);
         } else {
             if engage {
                 hvcfg.update_ctl(HvCtl::HvEngage as u8 |
@@ -143,6 +149,6 @@ fn main() {
             println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", target, code, resistance, lv, hv );
         }
     }
-    process::exit(0);
+    
     //    panic!("hard exitting.");
 }

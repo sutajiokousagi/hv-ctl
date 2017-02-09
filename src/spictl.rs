@@ -1,5 +1,5 @@
 use std::io;
-use spidev::{Spidev, SpidevOptions, SpidevTransfer, SPI_MODE_1};
+use spidev::{Spidev, SpidevOptions, SpidevTransfer, SPI_MODE_1, SPI_MODE_0};
 use cupi::{CuPi, delay_ms, DigitalWrite};
 use cupi::PinOutput;
 
@@ -7,6 +7,67 @@ const DAC_RST_N: usize = 25;
 const HV_FULL_SCALE: f64 = 200.0;  // is 1000.0 for production
 const HV_GAIN: f64 = (HV_FULL_SCALE / 12.0);
 const VREF: f64 = 0.6;
+
+#[derive(Debug)]
+pub enum HvSetErr {
+//    None,
+}
+
+fn create_adc() -> io::Result<Spidev> {
+    let mut spi = try!(Spidev::open("/dev/spidev0.0"));
+    let options = SpidevOptions::new()
+        .bits_per_word(8)
+        .max_speed_hz(4_000_000) 
+        .lsb_first(false)
+        .mode(SPI_MODE_0)
+        .build();
+    spi.configure(&options).unwrap();
+    
+    Ok(spi)
+}
+
+pub struct AdcRead {
+    initialized: bool,
+    spi: Spidev,
+}
+
+impl AdcRead {
+    pub fn new() -> Result <AdcRead, HvSetErr> {
+        let mut adc = AdcRead {
+            initialized: true,
+            spi: create_adc().unwrap(),
+        };
+        
+        Ok(adc)
+    }
+
+    pub fn cleanup(&mut self) {
+        if self.initialized {
+            self.initialized = false;
+        }
+    }
+
+    pub fn read(&mut self) -> u16 {
+        let tx_buf = [0; 2];
+        let mut rx_buf = [0; 2];
+        {
+            let mut transfer = SpidevTransfer::read_write(&tx_buf, &mut rx_buf);
+            self.spi.transfer(&mut transfer).unwrap();
+        }
+        
+        println!("{:?}", &rx_buf);
+        let retval: u16 = ((rx_buf[0] & 0x1f) as u16) << 7 | (((rx_buf[1] & 0xfe) as u16) >> 1);
+
+        return retval
+    }
+}
+
+impl Drop for AdcRead {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
 
 fn create_spi() -> io::Result<Spidev> {
     let mut spi = try!(Spidev::open("/dev/spidev0.1"));
@@ -19,11 +80,6 @@ fn create_spi() -> io::Result<Spidev> {
     spi.configure(&options).unwrap();
     
     Ok(spi)
-}
-
-#[derive(Debug)]
-pub enum HvSetErr {
-//    None,
 }
 
 pub struct HvSet {
@@ -68,6 +124,18 @@ impl HvSet {
             hvset.spi.transfer(&mut transfer).unwrap();
         }
 
+        // this is ironically documented as a footnote
+        tx_buf = [0x80, 0x01]; // prep for SDO Hi-Z
+        {
+            let mut transfer = SpidevTransfer::read_write(&tx_buf, &mut rx_buf);
+            hvset.spi.transfer(&mut transfer).unwrap();
+        }
+        tx_buf = [0x00, 0x00]; // nop command
+        {
+            let mut transfer = SpidevTransfer::read_write(&tx_buf, &mut rx_buf);
+            hvset.spi.transfer(&mut transfer).unwrap();
+        }
+        
         delay_ms(2);
         
         Ok(hvset)
@@ -121,6 +189,18 @@ impl HvSet {
         // println!("{:?}", &rx_buf);
         let retval: u16 = ((rx_buf[0] & 0x3) as u16) << 8 | (rx_buf[1] as u16);
 
+        // this is ironically documented as a footnote
+        tx_buf = [0x80, 0x01]; // prep for SDO Hi-Z
+        {
+            let mut transfer = SpidevTransfer::read_write(&tx_buf, &mut rx_buf);
+            self.spi.transfer(&mut transfer).unwrap();
+        }
+        tx_buf = [0x00, 0x00]; // nop command
+        {
+            let mut transfer = SpidevTransfer::read_write(&tx_buf, &mut rx_buf);
+            self.spi.transfer(&mut transfer).unwrap();
+        }
+        
         return retval
     }
 
