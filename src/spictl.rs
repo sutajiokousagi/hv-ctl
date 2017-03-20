@@ -4,9 +4,9 @@ use cupi::{CuPi, delay_ms, DigitalWrite};
 use cupi::PinOutput;
 
 const DAC_RST_N: usize = 25;
-const HV_FULL_SCALE: f64 = 200.0;  // is 1000.0 for production
 const HV_GAIN: f64 = (HV_FULL_SCALE / 12.0);
 const VREF: f64 = 0.6;
+use HV_FULL_SCALE; // defined in main.rs
 
 #[derive(Debug)]
 pub enum HvSetErr {
@@ -34,7 +34,7 @@ pub struct AdcRead {
 
 impl AdcRead {
     pub fn new() -> Result <AdcRead, HvSetErr> {
-        let mut adc = AdcRead {
+        let adc = AdcRead {
             initialized: true,
             spi: create_adc().unwrap(),
             hv_gain: 0.59120,  // this should become a parameter later on
@@ -50,7 +50,7 @@ impl AdcRead {
     }
 
     // returns the ADC code
-    pub fn read_code(&mut self) -> u16 {
+    pub fn read_code(&self) -> u16 {
         let tx_buf = [0; 2];
         let mut rx_buf = [0; 2];
         {
@@ -65,7 +65,7 @@ impl AdcRead {
     }
 
     // returns the estimated HV input
-    pub fn read_hv(&mut self) -> f64 {
+    pub fn read_hv(&self) -> f64 {
         let read_voltage = (self.read_code() as f64) * self.hv_gain;
 
         return read_voltage

@@ -25,18 +25,14 @@ extern crate quick_error;
 use cupi::CuPi;
 use cupi::delay_ms;
 
-use std::process;
-
 use std::str::from_utf8;
 use websocket::{Server, Message, Sender, Receiver};
 use websocket::message::Type;
 use websocket::header::WebSocketProtocol;
 
-// temporary uses
-use rand::distributions::{IndependentSample, Range};
-use std::{thread, time};
+use std::time::Instant;
 
-#[macro_use] extern crate text_io;
+const HV_FULL_SCALE: f64 = 200.0;  // set to max V of supply installed: is 1000.0 for production
 
 #[test]
 fn testlights() {
@@ -119,18 +115,18 @@ fn main() {
 
     let mut hvset = HvSet::new(&cupi).unwrap();
     
-    let mut target: u16 = 50;
+    let target: u16 = 50;
     let mut code: u16 = hvset.set_hv_target(target);
     let mut resistance: f64 = (code as f64) * (100_000.0 / 1024.0);
     let mut lv: f64 = 0.6 * ((resistance / 5100.0) + 1.0);
-    let mut hv: f64 = lv * (200.0 / 12.0); // 200.0 for initial testing, 1000,0 for production based on HV supply
+    let mut hv: f64 = lv * (HV_FULL_SCALE / 12.0); 
     println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", target, code, resistance, lv, hv );
 
-    let mut adc = AdcRead::new().unwrap();
+    let adc = AdcRead::new().unwrap();
     
     let mut engage = false;
 
-    let mut server = Server::bind("0.0.0.0:8080").unwrap();
+    let server = Server::bind("0.0.0.0:8080").unwrap();
 
     // state variables for row, col, control
     let mut hv_ctl_state: u8 = HvCtl::HvgenEna as u8;  // pure control state
@@ -170,8 +166,17 @@ fn main() {
         
 	    match message.opcode {
 	        Type::Close => {
-                    hvcfg.update_ctl(0, HvLockout::HvGenOff);
+                    hvset.set_hv_target(50); // set voltage target to default of 50
+                    // reset control state
+                    hv_ctl_state = HvCtl::HvgenEna as u8; // set to original value
+                    hvcfg.update_ctl(hv_ctl_state, HvLockout::HvGenOff);
                     engage = false;
+                    // reset row/col to none
+                    hv_row_sel_state = RowSel::RowNone;
+                    hv_col_sel_state = ColSel::ColNone;
+                    hvcfg.update_colsel(hv_col_sel_state);
+                    hvcfg.update_rowsel(hv_row_sel_state);
+                    
 		    let message = Message::close();
 		    sender.send_message(&message).unwrap();
 		    println!("Client {} disconnected", ip);
@@ -198,8 +203,25 @@ fn main() {
                         }
 
                         // start the ADC sampling here
-                        thread::sleep(time::Duration::from_millis(1000)); // for now just a dummy delay
-
+                        // send the trace data
+                        let now = Instant::now();
+                        let mut s: String = "".to_string();
+                        for _ in 0 .. 20000 {
+                            // should give elapsed millis
+                            let sample_time: f64 = (now.elapsed().as_secs() as f64 * 1_000_000_000.0 +
+                                                    (now.elapsed().subsec_nanos() as f64)) / 1_000_000.0;
+                            s.push_str( &sample_time.to_string().as_str() );
+                            s.push_str( "," );
+                            
+                            let sample_value: f64 = adc.read_hv();
+                            s.push_str( &sample_value.to_string().as_str() );
+                            s.push_str( "#" );
+                        }
+                        let msg: Message = Message::text( s );
+                        sender.send_message(&msg).unwrap();
+                        let msg: Message = Message::text( "u" );
+                        sender.send_message(&msg).unwrap();
+                        
                         // disengage the row/col
                         hvcfg.update_rowsel(RowSel::RowNone);
                         hvcfg.update_colsel(ColSel::ColNone);
@@ -210,24 +232,6 @@ fn main() {
                         } else {
                             hvcfg.update_ctl( hv_ctl_state, HvLockout::HvGenOff );
                         }
-
-                        // send the trace data
-                        let mut rng = rand::thread_rng();
-                        let between = Range::new(0f64, 0.9);
-                        
-                        let mut foo: f64 = 0.0;
-                        for _ in 1 .. 200 {
-                            let y: f64 = (6.28 * foo / 100.0).sin() * 256.0 + 300.0;
-                            let z: i32 = y as i32;
-                            let t: i32 = (foo * 1000.0) as i32;
-	                    let msg: Message = Message::text( t.to_string() + "," + &*z.to_string() );
-                            foo = foo + 1.0 + between.ind_sample(&mut rng);
-                            //                        foo = foo + 1.0;
-                            sender.send_message(&msg).unwrap();
-                            //thread::sleep(time::Duration::from_millis(10));
-                        }
-                        let msg: Message = Message::text( "u" );
-                        sender.send_message(&msg).unwrap();
                     } else {
                         if text == "HVON" {
                             engage = true;
@@ -274,6 +278,25 @@ fn main() {
                             hv_row_sel_state = RowSel::RowSel2;
                         } else if text == "rowx" {
                             hv_row_sel_state = RowSel::RowNone;
+
+                        } else if text == "hvup" {
+                            let actual_v: f64 = adc.read_hv();
+	                    let msg: Message = Message::text( "hvup,".to_string() + &actual_v.to_string() );
+                            sender.send_message(&msg).unwrap();
+                        } else if text.starts_with("shv") {
+                            let (_, arg) = text.split_at(3);
+                            let targetv = match arg.parse::<u16>() {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    println!("HV set argument not an integer! {:?}", e);
+                                    continue;
+                                }
+                            };
+                            code = hvset.set_hv_target(targetv);
+                            resistance = (code as f64) * (100_000.0 / 1024.0);
+                            lv = 0.6 * ((resistance / 5100.0) + 1.0);
+                            hv = lv * (HV_FULL_SCALE / 12.0);
+                            println!("Target {}V requested. DAC code {}, resistance {}ohms, lv {}V, hv {}V", target, code, resistance, lv, hv );
                         }
 
                         if ((hv_ctl_state & HvCtl::SelHicap as u8) != 0) ||
@@ -297,41 +320,7 @@ fn main() {
 	        _ => sender.send_message(&message).unwrap(),
 	    }
         }
-        /*
-        if target == 0 {
-            hvcfg.update_ctl(0, HvLockout::HvGenOff);
-            engage = false;
-        } else if target == 1 {
-            engage = true;
-            hvcfg.update_ctl(HvCtl::HvEngage as u8 |
-                             HvCtl::HvgenEna as u8 |
-                             HvCtl::SelLocap as u8 |
-                             HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
-        } else if target == 2 {
-            println!("HV measured: {}", adc.read_hv());
-        } else if target == 3 {
-            println!("Streamer test: {}", streamer.sample(&mut adc));
-        } else if target == 5 {
-            process::exit(0);
-        } else {
-            if engage {
-                hvcfg.update_ctl(HvCtl::HvEngage as u8 |
-                                 HvCtl::HvgenEna as u8 |
-                                 HvCtl::SelLocap as u8 |
-                                 HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
-            } else {
-                hvcfg.update_ctl(HvCtl::HvgenEna as u8 |
-                                 HvCtl::SelLocap as u8 |
-                                 HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
-            }
-            code = hvset.set_hv_target(target);
-            resistance = (code as f64) * (100_000.0 / 1024.0);
-            lv = 0.6 * ((resistance / 5100.0) + 1.0);
-            hv = lv * (200.0 / 12.0); // 200.0 for initial testing, 1000,0 for production based on HV supply
-            println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", target, code, resistance, lv, hv );
-        }
-         */
     }
     
-    //    panic!("hard exitting.");
+    panic!("hard exitting.");
 }
