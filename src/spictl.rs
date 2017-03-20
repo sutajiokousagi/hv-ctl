@@ -58,7 +58,7 @@ impl AdcRead {
             self.spi.transfer(&mut transfer).unwrap();
         }
         
-        println!("{:?}", &rx_buf);
+//        println!("{:?}", &rx_buf);
         let retval: u16 = ((rx_buf[0] & 0x1f) as u16) << 7 | (((rx_buf[1] & 0xfe) as u16) >> 1);
 
         return retval
