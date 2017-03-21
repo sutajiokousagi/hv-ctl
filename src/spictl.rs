@@ -4,7 +4,7 @@ use cupi::{CuPi, delay_ms, DigitalWrite};
 use cupi::PinOutput;
 
 const DAC_RST_N: usize = 25;
-const HV_GAIN: f64 = (HV_FULL_SCALE / 12.0);
+const HV_GAIN: f64 = ((HV_FULL_SCALE * 1.2) / 12.0); // 20% fudge factor due to low loading
 const VREF: f64 = 0.6;
 use HV_FULL_SCALE; // defined in main.rs
 use HV_MIN_SERVO_V;

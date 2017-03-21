@@ -36,7 +36,9 @@ const HV_FULL_SCALE: f64 = 200.0;  // set to max V of supply installed: is 1000.
 const HV_MIN_V: u16 = 60; // minimum voltage, after converter loading effects
 const HV_MIN_SERVO_V: u16 = 30; // minimum servo voltage -- commanded voltage
 const HV_CONVERGENCE: f64 = 0.5;  // convergence rate for HV offset
-const HV_TOLERANCE: f64 = 5.0; // stop converging when we're within 5V
+const HV_CONVERGENCE_HI_C: f64 = 0.15;  // convergence rate for HV offset
+const HV_TOLERANCE: f64 = 4.0; // stop converging when we're within 4V
+const HV_PANIC: f64 = 1150.0; // panic voltage -- shut down the system, we're near breakdown (1.2kV)
 
 #[test]
 fn testlights() {
@@ -176,6 +178,7 @@ fn main() {
                     hvset.set_hv_target(50); // set voltage target to default of 50
                     // reset control state
                     hv_ctl_state = HvCtl::HvgenEna as u8; // set to original value
+                    hv_res_state = 0;
                     hvcfg.update_ctl(hv_ctl_state, HvLockout::HvGenOff);
                     engage = false;
                     // reset row/col to none
@@ -230,7 +233,7 @@ fn main() {
                         // send the trace data
                         let now = Instant::now();
                         let mut s: String = "".to_string();
-                        for _ in 0 .. 2500 {
+                        for _ in 0 .. 3500 {
                             // should give elapsed millis
                             let sample_time: f64 = (now.elapsed().as_secs() as f64 * 1_000_000_000.0 +
                                                     (now.elapsed().subsec_nanos() as f64)) / 1_000_000.0;
@@ -265,12 +268,16 @@ fn main() {
                             
                         } else if text == "C10" {
                             hv_ctl_state |= HvCtl::SelLocap as u8;
+                            converged = false;
                         } else if text == "c10" {
                             hv_ctl_state &= !(HvCtl::SelLocap as u8);
+                            converged = false;
                         } else if text == "C25" {
                             hv_ctl_state |= HvCtl::SelHicap as u8;
+                            converged = false;
                         } else if text == "c25" {
                             hv_ctl_state &= !(HvCtl::SelHicap as u8);
+                            converged = false;
                             
                         } else if text == "R1000" {
                             hv_res_state |= HvCtl::Sel1000Ohm as u8;
@@ -309,11 +316,25 @@ fn main() {
 	                    let msg: Message = Message::text( "hvup,".to_string() + &actual_v.to_string() );
                             sender.send_message(&msg).unwrap();
 
+                            if actual_v > HV_PANIC {
+                                println!("Panic! HV exceeds max limit, locking out HV and setting target to min");
+                                // note this causes a state mismatch with the UI...
+                                engage = false;
+                                hvcfg.update_ctl(hv_ctl_state, HvLockout::HvGenOff);
+                                targetv = HV_MIN_V as f64;
+                                hvset.set_hv_target(targetv as u16);
+                            }
+
                             // only run feedback loop when the system is engaged
                             if ((hv_ctl_state & (HvCtl::HvEngage as u8)) != 0) && engage && !converged {
                                 let delta: f64 = (targetv as f64) - actual_v;
                                 if (delta.abs() > HV_TOLERANCE) && (adj_target >= (HV_MIN_SERVO_V as f64)) {
-                                    let adjustment: f64 = delta * HV_CONVERGENCE;
+                                    let adjustment: f64;
+                                    if (hv_ctl_state & HvCtl::SelHicap as u8) == 0 {
+                                        adjustment = delta * HV_CONVERGENCE;
+                                    } else {
+                                        adjustment = delta * HV_CONVERGENCE_HI_C;
+                                    }
                                     adj_target = adj_target + adjustment;
                                     code = hvset.set_hv_target(adj_target as u16);
                                     resistance = (code as f64) * (100_000.0 / 1024.0);
