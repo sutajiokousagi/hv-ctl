@@ -7,6 +7,7 @@ const DAC_RST_N: usize = 25;
 const HV_GAIN: f64 = (HV_FULL_SCALE / 12.0);
 const VREF: f64 = 0.6;
 use HV_FULL_SCALE; // defined in main.rs
+use HV_MIN_SERVO_V;
 
 #[derive(Debug)]
 pub enum HvSetErr {
@@ -222,9 +223,9 @@ impl HvSet {
         // (Vout / (gain * vref) - 1) * 5100 = (code * (100_000 / 1024))
         // ((Vout / (gain * vref) - 1) * 5100) * (1024 / 100_000) = code
         let mut v: u16 = voltage;
-        if voltage < 30 {
-            println!("Warning: voltage target less than minimum, setting to 30V");
-            v = 30;
+        if voltage < HV_MIN_SERVO_V {
+            println!("Warning: voltage target less than minimum, setting to {}V", HV_MIN_SERVO_V);
+            v = HV_MIN_SERVO_V;
         }
         if voltage > HV_FULL_SCALE as u16 {
             println!("Warning: voltage target greater than full scale, setting to {}", HV_FULL_SCALE);

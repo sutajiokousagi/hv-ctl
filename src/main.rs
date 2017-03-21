@@ -33,6 +33,10 @@ use websocket::header::WebSocketProtocol;
 use std::time::Instant;
 
 const HV_FULL_SCALE: f64 = 200.0;  // set to max V of supply installed: is 1000.0 for production
+const HV_MIN_V: u16 = 60; // minimum voltage, after converter loading effects
+const HV_MIN_SERVO_V: u16 = 30; // minimum servo voltage -- commanded voltage
+const HV_CONVERGENCE: f64 = 0.5;  // convergence rate for HV offset
+const HV_TOLERANCE: f64 = 5.0; // stop converging when we're within 5V
 
 #[test]
 fn testlights() {
@@ -115,12 +119,15 @@ fn main() {
 
     let mut hvset = HvSet::new(&cupi).unwrap();
     
-    let target: u16 = 50;
-    let mut code: u16 = hvset.set_hv_target(target);
+    let mut targetv: f64 = HV_MIN_V as f64;
+    let mut code: u16 = hvset.set_hv_target(targetv as u16);
     let mut resistance: f64 = (code as f64) * (100_000.0 / 1024.0);
     let mut lv: f64 = 0.6 * ((resistance / 5100.0) + 1.0);
     let mut hv: f64 = lv * (HV_FULL_SCALE / 12.0); 
-    println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", target, code, resistance, lv, hv );
+    println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", targetv, code, resistance, lv, hv );
+
+    let mut adj_target: f64 = targetv;
+    let mut converged: bool = false;
 
     let adc = AdcRead::new().unwrap();
     
@@ -189,6 +196,23 @@ fn main() {
                 Type::Text => {
                     let text = from_utf8(&*message.payload).unwrap();
                     if text == "t" {
+                        // don't allow trigger until voltage hits required value
+                        if !converged {
+                            println!("Aborting trigger, HV hasn't converged yet!");
+                            continue;
+                        }
+                        let mut actual_v: f64 = adc.read_hv();
+                        let mut delta_v: f64 = (targetv as f64) - actual_v;
+                        let now = Instant::now();
+                        // times out after 4 seconds
+                        while (delta_v.abs() > HV_TOLERANCE) && (now.elapsed().as_secs() < 4) {
+                            actual_v = adc.read_hv();
+                            delta_v = (targetv as f64) - actual_v;
+                        }
+                        if now.elapsed().as_secs() >= 4 {
+                            println!("WARNING: HV convergence aborted, but still performing zap.");
+                        }
+                        
                         // connect row/col before engaging HV
                         hvcfg.update_colsel(hv_col_sel_state);
                         hvcfg.update_rowsel(hv_row_sel_state);
@@ -206,7 +230,7 @@ fn main() {
                         // send the trace data
                         let now = Instant::now();
                         let mut s: String = "".to_string();
-                        for _ in 0 .. 20000 {
+                        for _ in 0 .. 2500 {
                             // should give elapsed millis
                             let sample_time: f64 = (now.elapsed().as_secs() as f64 * 1_000_000_000.0 +
                                                     (now.elapsed().subsec_nanos() as f64)) / 1_000_000.0;
@@ -235,6 +259,7 @@ fn main() {
                     } else {
                         if text == "HVON" {
                             engage = true;
+                            converged = false; // reconverge when turning on
                         } else if text == "h" {
                             engage = false;
                             
@@ -283,20 +308,39 @@ fn main() {
                             let actual_v: f64 = adc.read_hv();
 	                    let msg: Message = Message::text( "hvup,".to_string() + &actual_v.to_string() );
                             sender.send_message(&msg).unwrap();
+
+                            // only run feedback loop when the system is engaged
+                            if ((hv_ctl_state & (HvCtl::HvEngage as u8)) != 0) && engage && !converged {
+                                let delta: f64 = (targetv as f64) - actual_v;
+                                if (delta.abs() > HV_TOLERANCE) && (adj_target >= (HV_MIN_SERVO_V as f64)) {
+                                    let adjustment: f64 = delta * HV_CONVERGENCE;
+                                    adj_target = adj_target + adjustment;
+                                    code = hvset.set_hv_target(adj_target as u16);
+                                    resistance = (code as f64) * (100_000.0 / 1024.0);
+                                    lv = 0.6 * ((resistance / 5100.0) + 1.0);
+                                    hv = lv * (HV_FULL_SCALE / 12.0);
+                                    println!("Adjust to {}V. DAC code {}, resistance {}ohms, lv {}V, hv {}V", adj_target, code, resistance, lv, hv );
+                                }
+                                if delta.abs() <= HV_TOLERANCE {
+                                    converged = true;
+                                }
+                            }
                         } else if text.starts_with("shv") {
                             let (_, arg) = text.split_at(3);
-                            let targetv = match arg.parse::<u16>() {
+                            targetv = match arg.parse::<f64>() {
                                 Ok(v) => v,
                                 Err(e) => {
                                     println!("HV set argument not an integer! {:?}", e);
                                     continue;
                                 }
                             };
-                            code = hvset.set_hv_target(targetv);
+                            adj_target = targetv;
+                            converged = false;
+                            code = hvset.set_hv_target(targetv as u16);
                             resistance = (code as f64) * (100_000.0 / 1024.0);
                             lv = 0.6 * ((resistance / 5100.0) + 1.0);
                             hv = lv * (HV_FULL_SCALE / 12.0);
-                            println!("Target {}V requested. DAC code {}, resistance {}ohms, lv {}V, hv {}V", target, code, resistance, lv, hv );
+                            println!("Target {}V requested. DAC code {}, resistance {}ohms, lv {}V, hv {}V", targetv, code, resistance, lv, hv );
                         }
 
                         if ((hv_ctl_state & HvCtl::SelHicap as u8) != 0) ||
