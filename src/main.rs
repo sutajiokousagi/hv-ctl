@@ -341,6 +341,23 @@ fn main() {
                             lv = 0.6 * ((resistance / 5100.0) + 1.0);
                             hv = lv * (HV_FULL_SCALE / 12.0);
                             println!("Target {}V requested. DAC code {}, resistance {}ohms, lv {}V, hv {}V", targetv, code, resistance, lv, hv );
+                        } else if text.starts_with("setRC") {
+                            let v: Vec<&str> = text.splitn(3, ',').collect();
+                            match v[1].parse().unwrap() { // match row state
+                                0 => hv_row_sel_state = RowSel::RowNone,
+                                1 => hv_row_sel_state = RowSel::RowSel1,
+                                2 => hv_row_sel_state = RowSel::RowSel2,
+                                _ => hv_row_sel_state = RowSel::RowNone,
+                            }
+                            match v[2].parse().unwrap() {
+                                0 => hv_col_sel_state = ColSel::ColNone,
+                                1 => hv_col_sel_state = ColSel::ColSel1,
+                                2 => hv_col_sel_state = ColSel::ColSel2,
+                                _ => hv_col_sel_state = ColSel::ColNone,
+                            }
+                            // use this only for testing, normally row/col set just at trigger time
+                            // hvcfg.update_colsel(hv_col_sel_state);  
+                            // hvcfg.update_rowsel(hv_row_sel_state);
                         }
 
                         if ((hv_ctl_state & HvCtl::SelHicap as u8) != 0) ||
