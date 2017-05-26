@@ -4,8 +4,8 @@ version = "0.1.0"
 authors = ["bunnie"]
 
 [dependencies]
-cupi = "*"
-cupi_shift = "*"
+cupi = { path = "../cupi" }
+cupi_shift = { path = "../cupi_shift" }
 libc = "*"
 quick-error = "*"
 enum_primitive = "*"
