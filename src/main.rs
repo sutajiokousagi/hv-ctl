@@ -20,6 +20,7 @@ extern crate quick_error;
 
 use cupi::CuPi;
 use cupi::delay_ms;
+use cupi::board;
 
 use std::process;
 
@@ -91,6 +92,9 @@ fn testlights() {
 }
 
 fn main() {
+    let board = board();
+    println!("{:?}", board);
+    
     let cupi = CuPi::new().unwrap();
 
     let mut hvcfg = HvConfig::new(&cupi).unwrap();
