@@ -26,15 +26,17 @@ use cupi::CuPi;
 use cupi::delay_ms;
 
 use std::str::from_utf8;
-use websocket::{Server, Message, Sender, Receiver};
-use websocket::message::Type;
-use websocket::header::WebSocketProtocol;
+use websocket::OwnedMessage;
+use websocket::Message;
+use websocket::sync::Server;
+use std::sync::mpsc::channel;
 
 use std::time::Instant;
 
 const HV_FULL_SCALE: f64 = 200.0;  // set to max V of supply installed: is 1000.0 for production
 const HV_MIN_V: u16 = 60; // minimum voltage, after converter loading effects
 const HV_MIN_SERVO_V: u16 = 30; // minimum servo voltage -- commanded voltage
+const HV_MAX_SERVO_V: f64 = 1200.0; // maximum servo voltage -- commanded voltage
 const HV_CONVERGENCE: f64 = 0.5;  // convergence rate for HV offset
 const HV_CONVERGENCE_HI_C: f64 = 0.15;  // convergence rate for HV offset
 const HV_TOLERANCE: f64 = 4.0; // stop converging when we're within 4V
@@ -144,37 +146,37 @@ fn main() {
     let mut hv_row_sel_state: RowSel = RowSel::RowNone;  // row/col sel state -- only engage when HV is disengaged
     let mut hv_col_sel_state: ColSel = ColSel::ColNone;
     
-    for connection in server {
-        let request = connection.unwrap().read_request().unwrap(); // Get the request
-        let headers = request.headers.clone(); // Keep the headers so we can check them
-            
-        request.validate().unwrap(); // Validate the request
+    for request in server.filter_map(Result::ok) {
+	if !request.protocols().contains(&"rust-websocket".to_string()) {
+	    request.reject().unwrap();
+            println!("Connection request does not specify the correct protocol, rejecting.");
+	    continue;
+	}
         
-        let mut response = request.accept(); // Form a response
+	let mut client = request.use_protocol("rust-websocket").accept().unwrap();
         
-        if let Some(&WebSocketProtocol(ref protocols)) = headers.get() {
-	    if protocols.contains(&("rust-websocket".to_string())) {
-	        // We have a protocol we want to use
-	        response.headers.set(WebSocketProtocol(vec!["rust-websocket".to_string()]));
-	    }
-        }
-    
-        let mut client = response.send().unwrap(); // Send the response
-        
-        let ip = client.get_mut_sender()
-	    .get_mut()
-	    .peer_addr()
-	    .unwrap();
-        
+	let ip = client.peer_addr().unwrap();
+
         println!("Connection from {}", ip);
     
-        let (mut sender, mut receiver) = client.split();
+	let (mut receiver, mut sender) = client.split().unwrap();
+
+        let (tx, rx) = channel();
+	let tx_1 = tx.clone();
     
         for message in receiver.incoming_messages() {
-	    let message: Message = message.unwrap();
+	    let message = match message {
+		Ok(m) => m,
+		Err(e) => {
+		    println!("Receive Loop: {:?}", e);
+		    let _ = tx_1.send(OwnedMessage::Close(None));
+                    //		    return;
+                    continue;
+		}
+	    };
         
-	    match message.opcode {
-	        Type::Close => {
+	    match message {
+	        OwnedMessage::Close(_) => {
                     hvset.set_hv_target(50); // set voltage target to default of 50
                     // reset control state
                     hv_ctl_state = HvCtl::HvgenEna as u8; // set to original value
@@ -187,17 +189,24 @@ fn main() {
                     hvcfg.update_colsel(hv_col_sel_state);
                     hvcfg.update_rowsel(hv_row_sel_state);
                     
-		    let message = Message::close();
-		    sender.send_message(&message).unwrap();
+		    let _ = tx_1.send(OwnedMessage::Close(None));
 		    println!("Client {} disconnected", ip);
                     break;
 	        },
-	        Type::Ping => {
-		    let message = Message::pong(message.payload);
-		    sender.send_message(&message).unwrap();
+	        OwnedMessage::Ping(data) => {
+		    match tx_1.send(OwnedMessage::Pong(data)) {
+			// Send a pong in response
+			Ok(()) => (),
+			Err(e) => {
+			    println!("Receive Loop: {:?}", e);
+                            //			    return;
+                            continue;
+			}
+		    }
 	        },
-                Type::Text => {
-                    let text = from_utf8(&*message.payload).unwrap();
+                OwnedMessage::Text(data) => {
+                    //                    let text = from_utf8(&*message.payload).unwrap();
+                    let text = data;
                     if text == "t" {
                         // don't allow trigger until voltage hits required value
                         if !converged {
@@ -328,20 +337,21 @@ fn main() {
                             // only run feedback loop when the system is engaged
                             if ((hv_ctl_state & (HvCtl::HvEngage as u8)) != 0) && engage && !converged {
                                 let delta: f64 = (targetv as f64) - actual_v;
-                                if (delta.abs() > HV_TOLERANCE) && (adj_target >= (HV_MIN_SERVO_V as f64)) {
-                                    let adjustment: f64;
-                                    if (hv_ctl_state & HvCtl::SelHicap as u8) == 0 {
-                                        adjustment = delta * HV_CONVERGENCE;
-                                    } else {
-                                        adjustment = delta * HV_CONVERGENCE_HI_C;
+                                if (delta.abs() > HV_TOLERANCE) && (adj_target >= (HV_MIN_SERVO_V as f64))
+                                    && (adj_target < (HV_MAX_SERVO_V)) {
+                                        let adjustment: f64;
+                                        if (hv_ctl_state & HvCtl::SelHicap as u8) == 0 {
+                                            adjustment = delta * HV_CONVERGENCE;
+                                        } else {
+                                            adjustment = delta * HV_CONVERGENCE_HI_C;
+                                        }
+                                        adj_target = adj_target + adjustment;
+                                        code = hvset.set_hv_target(adj_target as u16);
+                                        resistance = (code as f64) * (100_000.0 / 1024.0);
+                                        lv = 0.6 * ((resistance / 5100.0) + 1.0);
+                                        hv = lv * (HV_FULL_SCALE / 12.0);
+                                        println!("Adjust to {}V. DAC code {}, resistance {}ohms, lv {}V, hv {}V", adj_target, code, resistance, lv, hv );
                                     }
-                                    adj_target = adj_target + adjustment;
-                                    code = hvset.set_hv_target(adj_target as u16);
-                                    resistance = (code as f64) * (100_000.0 / 1024.0);
-                                    lv = 0.6 * ((resistance / 5100.0) + 1.0);
-                                    hv = lv * (HV_FULL_SCALE / 12.0);
-                                    println!("Adjust to {}V. DAC code {}, resistance {}ohms, lv {}V, hv {}V", adj_target, code, resistance, lv, hv );
-                                }
                                 if delta.abs() <= HV_TOLERANCE {
                                     converged = true;
                                 }
