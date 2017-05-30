@@ -33,8 +33,8 @@ use std::sync::mpsc::channel;
 
 use std::time::Instant;
 
-const HV_FULL_SCALE: f64 = 200.0;  // set to max V of supply installed: is 1000.0 for production
-const HV_MIN_V: u16 = 60; // minimum voltage, after converter loading effects
+const HV_FULL_SCALE: f64 = 1000.0;  // set to max V of supply installed: is 1000.0 for production
+const HV_MIN_V: u16 = 100; // minimum voltage, after converter loading effects
 const HV_MIN_SERVO_V: u16 = 30; // minimum servo voltage -- commanded voltage
 const HV_MAX_SERVO_V: f64 = 1200.0; // maximum servo voltage -- commanded voltage
 const HV_CONVERGENCE: f64 = 0.5;  // convergence rate for HV offset
