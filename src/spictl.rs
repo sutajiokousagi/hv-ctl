@@ -4,7 +4,7 @@ use cupi::{CuPi, delay_ms, DigitalWrite};
 use cupi::PinOutput;
 
 const DAC_RST_N: usize = 25;
-const HV_FULL_SCALE: f64 = 200.0;  // is 1000.0 for production
+const HV_FULL_SCALE: f64 = 1000.0;  // is 1000.0 for production
 const HV_GAIN: f64 = (HV_FULL_SCALE / 12.0);
 const VREF: f64 = 0.6;
 
@@ -196,7 +196,7 @@ impl HvSet {
             let mut transfer = SpidevTransfer::read_write(&tx_buf, &mut rx_buf);
             self.spi.transfer(&mut transfer).unwrap();
         }
-        // println!("{:?}", &rx_buf);
+        println!("{:?}", &rx_buf);
         let retval: u16 = ((rx_buf[0] & 0x3) as u16) << 8 | (rx_buf[1] as u16);
 
         // this is ironically documented as a footnote

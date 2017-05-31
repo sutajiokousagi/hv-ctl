@@ -82,8 +82,7 @@ fn testlights() {
         println!("specific control");
         hvcfg.update_ctl(HvCtl::HvEngage as u8 |
                          HvCtl::HvgenEna as u8 |
-                         HvCtl::SelLocap as u8 |
-                         HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
+                         HvCtl::SelLocap as u8, HvLockout::HvGenOn);
         delay_ms(1000);
         
         println!("control off");
@@ -110,11 +109,11 @@ fn main() {
 
     let mut hvset = HvSet::new(&cupi).unwrap();
     
-    let mut target: u16 = 50;
+    let mut target: u16 = 100;
     let mut code: u16 = hvset.set_hv_target(target);
     let mut resistance: f64 = (code as f64) * (100_000.0 / 1024.0);
     let mut lv: f64 = 0.6 * ((resistance / 5100.0) + 1.0);
-    let mut hv: f64 = lv * (200.0 / 12.0); // 200.0 for initial testing, 1000,0 for production based on HV supply
+    let mut hv: f64 = lv * (1000.0 / 12.0); // 200.0 for initial testing, 1000,0 for production based on HV supply
     println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", target, code, resistance, lv, hv );
 
     let mut adc = AdcRead::new().unwrap();
@@ -129,8 +128,7 @@ fn main() {
             engage = true;
             hvcfg.update_ctl(HvCtl::HvEngage as u8 |
                              HvCtl::HvgenEna as u8 |
-                             HvCtl::SelLocap as u8 |
-                             HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
+                             HvCtl::SelLocap as u8, HvLockout::HvGenOn);
         } else if target == 2 {
             println!("HV measured: {}", adc.read_hv());
         } else if target == 5 {
@@ -139,17 +137,15 @@ fn main() {
             if engage {
                 hvcfg.update_ctl(HvCtl::HvEngage as u8 |
                                  HvCtl::HvgenEna as u8 |
-                                 HvCtl::SelLocap as u8 |
-                                 HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
+                                 HvCtl::SelLocap as u8, HvLockout::HvGenOn);
             } else {
                 hvcfg.update_ctl(HvCtl::HvgenEna as u8 |
-                                 HvCtl::SelLocap as u8 |
-                                 HvCtl::Sel1000Ohm as u8, HvLockout::HvGenOn);
+                                 HvCtl::SelLocap as u8, HvLockout::HvGenOn);
             }
             code = hvset.set_hv_target(target);
             resistance = (code as f64) * (100_000.0 / 1024.0);
             lv = 0.6 * ((resistance / 5100.0) + 1.0);
-            hv = lv * (200.0 / 12.0); // 200.0 for initial testing, 1000,0 for production based on HV supply
+            hv = lv * (1000.0 / 12.0); // 200.0 for initial testing, 1000,0 for production based on HV supply
             println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", target, code, resistance, lv, hv );
         }
     }
