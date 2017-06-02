@@ -32,15 +32,23 @@ use websocket::sync::Server;
 use std::sync::mpsc::channel;
 
 use std::time::Instant;
+use std::time::Duration;
+use std::{thread,time};
 
 const HV_FULL_SCALE: f64 = 1000.0;  // set to max V of supply installed: is 1000.0 for production
-const HV_MIN_V: u16 = 100; // minimum voltage, after converter loading effects
-const HV_MIN_SERVO_V: u16 = 30; // minimum servo voltage -- commanded voltage
+//const HV_GAIN: f64 = ((HV_FULL_SCALE * 1.2) / 12.0); // 20% fudge factor due to low loading
+
+// use HV_GAIN instead of HV_FULL_SCALE / 12.0V, because the supply offsets are substantial
+const HV_GAIN: f64 = 119.0; // empirically derived from measurements, gain factor of DAC->HV output
+
+const HV_MIN_V: u16 = 120; // minimum voltage, after converter loading effects
+const HV_MIN_SERVO_V: u16 = 100; // minimum servo voltage -- commanded voltage
 const HV_MAX_SERVO_V: f64 = 1200.0; // maximum servo voltage -- commanded voltage
-const HV_CONVERGENCE: f64 = 0.5;  // convergence rate for HV offset
-const HV_CONVERGENCE_HI_C: f64 = 0.15;  // convergence rate for HV offset
-const HV_TOLERANCE: f64 = 4.0; // stop converging when we're within 4V
+const HV_CONVERGENCE: f64 = 0.2;  // convergence rate for HV offset
+const HV_CONVERGENCE_HI_C: f64 = 0.05;  // convergence rate for HV offset
+const HV_TOLERANCE: f64 = 5.0; // stop converging when we're within 5V
 const HV_PANIC: f64 = 1150.0; // panic voltage -- shut down the system, we're near breakdown (1.2kV)
+const HV_FIXED_RES: f64 = 6800.0;
 
 #[test]
 fn testlights() {
@@ -107,6 +115,54 @@ fn testlights() {
     }
 }
 
+fn discharge_and_resume(hvcfg: &mut HvConfig, hv_ctl_state: u8, engage: bool) {
+    let caplo_sel: bool = (hv_ctl_state & HvCtl::SelLocap as u8) != 0;
+    let caphi_sel: bool = (hv_ctl_state & HvCtl::SelHicap as u8) != 0;
+
+    // don't disturb the lockout status, just disengage the relay
+    let mut hvon: HvLockout = HvLockout::HvGenOff;
+    if engage {
+        hvon = HvLockout::HvGenOn;
+    }
+
+    let mut hv_ctl = hv_ctl_state & !(HvCtl::HvEngage as u8); // disengage the HV relay
+    
+    // disengage relay and give it 10ms to break before engaging the discharge resistor
+    hvcfg.update_ctl(hv_ctl, hvon);
+    thread::sleep(time::Duration::from_millis(10));
+
+    // discharge the currently selected
+    hvcfg.update_ctl(hv_ctl | HvCtl::Sel300Ohm as u8, hvon);
+    thread::sleep(time::Duration::from_millis(200));
+    hvcfg.update_ctl(hv_ctl, hvon);
+    thread::sleep(time::Duration::from_millis(10));
+
+    // deselect all caps (break before make to prevent charge sharing)
+    let mut hv_ctl_nocaps = hv_ctl & !(HvCtl::SelLocap as u8) & !(HvCtl::SelHicap as u8);
+    hvcfg.update_ctl(hv_ctl_nocaps, hvon);
+    thread::sleep(time::Duration::from_millis(1));
+
+    // invert the capacitor selections
+    if !caplo_sel {
+        hv_ctl_nocaps |= HvCtl::SelLocap as u8;
+    }
+
+    if !caphi_sel {
+        hv_ctl_nocaps |= HvCtl::SelHicap as u8;
+    }
+    
+    // discharge the unselected caps
+    hvcfg.update_ctl(hv_ctl_nocaps | HvCtl::Sel300Ohm as u8, hvon);
+    thread::sleep(time::Duration::from_millis(200));
+    
+    // deselect discharge resistor and wait 10ms for deselect to happen
+    hvcfg.update_ctl(hv_ctl_nocaps, hvon);
+    thread::sleep(time::Duration::from_millis(10));
+    
+    // restore original state
+    hvcfg.update_ctl(hv_ctl_state,  hvon);
+}
+
 fn main() {
     let cupi = CuPi::new().unwrap();
 
@@ -126,8 +182,9 @@ fn main() {
     let mut targetv: f64 = HV_MIN_V as f64;
     let mut code: u16 = hvset.set_hv_target(targetv as u16);
     let mut resistance: f64 = (code as f64) * (100_000.0 / 1024.0);
-    let mut lv: f64 = 0.6 * ((resistance / 5100.0) + 1.0);
-    let mut hv: f64 = lv * (HV_FULL_SCALE / 12.0); 
+    let mut lv: f64 = 0.6 * ((resistance / HV_FIXED_RES) + 1.0);
+//    let mut hv: f64 = lv * (HV_FULL_SCALE / 12.0); 
+    let mut hv: f64 = lv * HV_GAIN; 
     println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", targetv, code, resistance, lv, hv );
 
     let mut adj_target: f64 = targetv;
@@ -231,10 +288,16 @@ fn main() {
 
                         // trigger the HV system
                         if engage  {
+                            hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOn );
+                            // wait 10ms for relay to open before engaging the resistors
+                            thread::sleep(time::Duration::from_millis(10));
                             hvcfg.update_ctl( (hv_ctl_state | hv_res_state) & !(HvCtl::HvEngage as u8), HvLockout::HvGenOn );
                         } else {
                             // this is used for "dry runs", eg HV is locked out but we still go through
                             // the motions of triggering the cell
+                            hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
+                            // wait 10ms for relay to open before engaging the resistors
+                            thread::sleep(time::Duration::from_millis(10));
                             hvcfg.update_ctl( (hv_ctl_state | hv_res_state) & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
                         }
 
@@ -264,8 +327,14 @@ fn main() {
 
                         // disengage the resistors
                         if engage  {
+                            hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOn );
+                            // wait 10ms for resistor deselection before potentially re-engaging relays
+                            thread::sleep(time::Duration::from_millis(10));
                             hvcfg.update_ctl( hv_ctl_state, HvLockout::HvGenOn );
                         } else {
+                            hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
+                            // wait 10ms for resistor deselection before potentially re-engaging relays
+                            thread::sleep(time::Duration::from_millis(10));
                             hvcfg.update_ctl( hv_ctl_state, HvLockout::HvGenOff );
                         }
                     } else {
@@ -276,15 +345,19 @@ fn main() {
                             engage = false;
                             
                         } else if text == "C10" {
+                            discharge_and_resume(&mut hvcfg, hv_ctl_state, engage);
                             hv_ctl_state |= HvCtl::SelLocap as u8;
                             converged = false;
                         } else if text == "c10" {
+                            discharge_and_resume(&mut hvcfg, hv_ctl_state, engage);
                             hv_ctl_state &= !(HvCtl::SelLocap as u8);
                             converged = false;
                         } else if text == "C25" {
+                            discharge_and_resume(&mut hvcfg, hv_ctl_state, engage);
                             hv_ctl_state |= HvCtl::SelHicap as u8;
                             converged = false;
                         } else if text == "c25" {
+                            discharge_and_resume(&mut hvcfg, hv_ctl_state, engage);
                             hv_ctl_state &= !(HvCtl::SelHicap as u8);
                             converged = false;
                             
@@ -348,8 +421,9 @@ fn main() {
                                         adj_target = adj_target + adjustment;
                                         code = hvset.set_hv_target(adj_target as u16);
                                         resistance = (code as f64) * (100_000.0 / 1024.0);
-                                        lv = 0.6 * ((resistance / 5100.0) + 1.0);
-                                        hv = lv * (HV_FULL_SCALE / 12.0);
+                                        lv = 0.6 * ((resistance / HV_FIXED_RES) + 1.0);
+//                                        hv = lv * (HV_FULL_SCALE / 12.0);
+                                        hv = lv * HV_GAIN;
                                         println!("Adjust to {}V. DAC code {}, resistance {}ohms, lv {}V, hv {}V", adj_target, code, resistance, lv, hv );
                                     }
                                 if delta.abs() <= HV_TOLERANCE {
@@ -369,8 +443,9 @@ fn main() {
                             converged = false;
                             code = hvset.set_hv_target(targetv as u16);
                             resistance = (code as f64) * (100_000.0 / 1024.0);
-                            lv = 0.6 * ((resistance / 5100.0) + 1.0);
-                            hv = lv * (HV_FULL_SCALE / 12.0);
+                            lv = 0.6 * ((resistance / HV_FIXED_RES) + 1.0);
+//                            hv = lv * (HV_FULL_SCALE / 12.0);
+                            hv = lv * HV_GAIN;
                             println!("Target {}V requested. DAC code {}, resistance {}ohms, lv {}V, hv {}V", targetv, code, resistance, lv, hv );
                         } else if text.starts_with("setRC") {
                             let v: Vec<&str> = text.splitn(3, ',').collect();
@@ -390,7 +465,7 @@ fn main() {
                             // hvcfg.update_colsel(hv_col_sel_state);  
                             // hvcfg.update_rowsel(hv_row_sel_state);
                         }
-
+                        
                         if ((hv_ctl_state & HvCtl::SelHicap as u8) != 0) ||
                             ((hv_ctl_state & HvCtl::SelLocap as u8) != 0) {
                                 // if either cap is selected, engage the relay for charging
