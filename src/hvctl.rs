@@ -144,6 +144,15 @@ impl HvConfig {
     }
 
     pub fn update_ctl(&mut self, val: u8, hvon: HvLockout) {
+        if ((val & HvCtl::HvEngage as u8) != 0) &&
+            ((val & (HvCtl::Sel1000Ohm as u8 | HvCtl::Sel750Ohm as u8 |
+                    HvCtl::Sel620Ohm as u8 | HvCtl::Sel300Ohm as u8)) != 0) {
+                // this is an error condition -- never engage the relay while the static load
+                // resistors are on. Higher level code has failed. abort.
+                println!("ERROR: load resistor(s) selected and relay engaged. Locking out HV and aborting!");
+                self.pin_lockout_n.low().unwrap();
+                return;
+            }
         self.shifter.set(self.hvsel, val as usize, true);
         if hvon == HvLockout::HvGenOn {
             self.pin_lockout_n.high().unwrap();

@@ -4,9 +4,11 @@ use cupi::{CuPi, delay_ms, DigitalWrite};
 use cupi::PinOutput;
 
 const DAC_RST_N: usize = 25;
-const HV_FULL_SCALE: f64 = 1000.0;  // is 1000.0 for production
-const HV_GAIN: f64 = (HV_FULL_SCALE / 12.0);
 const VREF: f64 = 0.6;
+use HV_FULL_SCALE; // defined in main.rs
+use HV_MIN_SERVO_V;
+use HV_FIXED_RES;
+use HV_GAIN;
 
 #[derive(Debug)]
 pub enum HvSetErr {
@@ -29,12 +31,12 @@ fn create_adc() -> io::Result<Spidev> {
 pub struct AdcRead {
     initialized: bool,
     spi: Spidev,
-    hv_gain: f64,
+    hv_gain: f64, // this is the gain factor of the hv feedback->ADC code, not DAC
 }
 
 impl AdcRead {
     pub fn new() -> Result <AdcRead, HvSetErr> {
-        let mut adc = AdcRead {
+        let adc = AdcRead {
             initialized: true,
             spi: create_adc().unwrap(),
             hv_gain: 0.59120,  // this should become a parameter later on
@@ -50,7 +52,7 @@ impl AdcRead {
     }
 
     // returns the ADC code
-    pub fn read_code(&mut self) -> u16 {
+    pub fn read_code(&self) -> u16 {
         let tx_buf = [0; 2];
         let mut rx_buf = [0; 2];
         {
@@ -58,14 +60,14 @@ impl AdcRead {
             self.spi.transfer(&mut transfer).unwrap();
         }
         
-        println!("{:?}", &rx_buf);
+//        println!("{:?}", &rx_buf);
         let retval: u16 = ((rx_buf[0] & 0x1f) as u16) << 7 | (((rx_buf[1] & 0xfe) as u16) >> 1);
 
         return retval
     }
 
     // returns the estimated HV input
-    pub fn read_hv(&mut self) -> f64 {
+    pub fn read_hv(&self) -> f64 {
         let read_voltage = (self.read_code() as f64) * self.hv_gain;
 
         return read_voltage
@@ -215,22 +217,22 @@ impl HvSet {
     }
 
     pub fn set_hv_target(&mut self, voltage: u16) -> u16 {
-        // Vout = gain * vref * (DAC-R / 5100 + 1)
+        // Vout = gain * vref * (DAC-R / 6800 + 1)
         // DAC-R = code * (100_000 / 1024)
-        // Vout = gain * vref * ((code * (100_000 / 1024)) / 5100 + 1)
-        // Vout / (gain * vref) - 1 = (code * (100_000 / 1024)) / 5100
-        // (Vout / (gain * vref) - 1) * 5100 = (code * (100_000 / 1024))
-        // ((Vout / (gain * vref) - 1) * 5100) * (1024 / 100_000) = code
+        // Vout = gain * vref * ((code * (100_000 / 1024)) / 6800 + 1)
+        // Vout / (gain * vref) - 1 = (code * (100_000 / 1024)) / 6800
+        // (Vout / (gain * vref) - 1) * 6800 = (code * (100_000 / 1024))
+        // ((Vout / (gain * vref) - 1) * 6800) * (1024 / 100_000) = code
         let mut v: u16 = voltage;
-        if voltage < 30 {
-            println!("Warning: voltage target less than minimum, setting to 30V");
-            v = 30;
+        if voltage < HV_MIN_SERVO_V {
+            println!("Warning: voltage target less than minimum, setting to {}V", HV_MIN_SERVO_V);
+            v = HV_MIN_SERVO_V;
         }
         if voltage > HV_FULL_SCALE as u16 {
             println!("Warning: voltage target greater than full scale, setting to {}", HV_FULL_SCALE);
             v = HV_FULL_SCALE as u16;
         }
-        let code: u16 = ((((v as f64) / (HV_GAIN * VREF) - 1.0) * 5100.0) * (1024.0 / 100_000.0)) as u16;
+        let code: u16 = ((((v as f64) / (HV_GAIN * VREF) - 1.0) * HV_FIXED_RES) * (1024.0 / 100_000.0)) as u16;
         self.set_code( code );
 
         return code;
