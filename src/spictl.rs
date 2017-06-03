@@ -198,7 +198,7 @@ impl HvSet {
             let mut transfer = SpidevTransfer::read_write(&tx_buf, &mut rx_buf);
             self.spi.transfer(&mut transfer).unwrap();
         }
-        println!("{:?}", &rx_buf);
+        // println!("{:?}", &rx_buf);
         let retval: u16 = ((rx_buf[0] & 0x3) as u16) << 8 | (rx_buf[1] as u16);
 
         // this is ironically documented as a footnote
