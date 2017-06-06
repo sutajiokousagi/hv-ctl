@@ -41,6 +41,9 @@ use clap::{Arg, App, SubCommand};
 
 use std::process;
 
+use std::process::{Command, Stdio};
+use std::io::{Read, Write};
+
 const HV_FULL_SCALE: f64 = 1000.0;  // set to max V of supply installed: is 1000.0 for production
 //const HV_GAIN: f64 = ((HV_FULL_SCALE * 1.2) / 12.0); // 20% fudge factor due to low loading
 
@@ -56,11 +59,11 @@ const HV_TOLERANCE: f64 = 5.0; // stop converging when we're within 5V
 const HV_PANIC: f64 = 1150.0; // panic voltage -- shut down the system, we're near breakdown (1.2kV)
 const HV_FIXED_RES: f64 = 6800.0;
 
-const PID_KP: f64 = 10.0;
-const PID_KI: f64 = 1.0;
-const PID_KD: f64 = 1.0;
-const PID_N: f64 = 100.0;
-const PID_Ts: f64 = 0.05;
+const PID_KP: f64 = 2.0;
+const PID_KI: f64 = 5.0; // 8 @ 10uF, 5 @ 25uF; 5 is more stable, 8 is faster
+const PID_KD: f64 = 0.4;
+const PID_Ts: f64 = 0.01;
+const PID_N: f64 = 1.0 / PID_Ts;
 
 fn discharge_and_resume(hvcfg: &mut HvConfig, hv_ctl_state: u8, engage: bool) {
     let caplo_sel: bool = (hv_ctl_state & HvCtl::SelLocap as u8) != 0;
@@ -206,6 +209,17 @@ fn main() {
     let do_websockets = matches.is_present("websocket");
     
     if !do_websockets {
+        // setup gnuplot output
+        let mut child = Command::new("gnuplot")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("gnuplot command failed to start");
+        let mut child_stdin = child.stdin.take().expect("No stdin found on child");
+        let mut child_stdout = child.stdout.take().expect("No stdout found on child");
+        
+        writeln!(child_stdin, "set terminal png size 800, 1200; set output 'test.png'; set datafile separator \",\"; plot '-' using 1:2 with lines title 'Control', '' using 1:2 with lines title 'Output'").expect("Unable to write to child");
+        
         // state variables for row, col, control
         let mut hv_ctl_state: u8 = HvCtl::HvgenEna as u8;  // pure control state
     
@@ -315,6 +329,10 @@ fn main() {
         let mut e1 = 0.0;
         let mut e2 = 0.0;
         let mut actual_v: f64 = adc.read_hv();
+        let mut loop_iter = 0;
+        let mut s: String = "".to_string();
+        
+        let now = Instant::now();
         while !loop_done {
             e2 = e1;
             e1 = e0;
@@ -341,16 +359,38 @@ fn main() {
             if u0 < HV_MIN_SERVO_V as f64 {
                 u0 = HV_MIN_SERVO_V as f64;
             }
-            println!("Set point: {}", u0 as u16);
-            hvset.set_hv_target(u0 as u16);
-            thread::sleep(time::Duration::from_millis(50));
+//            println!("Set point: {}", u0 as u16);
+            if loop_iter >= 3 { // let the loop run 3 steps to initialize the loop filters to rational values
+                hvset.set_hv_target(u0 as u16);
+            }
+            writeln!(child_stdin, "{}, {}", loop_iter, u0).expect("Unable to write to child");
+            s.push_str( &*loop_iter.to_string() );
+            s.push_str( ", " );
+            s.push_str( &*actual_v.to_string() );
+            s.push_str( "\n" );
+            loop_iter = loop_iter + 1;
             
-            loop_done = true;
+            let mut sample_time: f64 = (now.elapsed().as_secs() as f64 * 1_000_000_000.0 +
+                                        (now.elapsed().subsec_nanos() as f64)) / 1_000_000.0;
+            while sample_time < loop_iter as f64 * 10.0 {
+                //thread::sleep(time::Duration::from_millis(10));
+                sample_time = (now.elapsed().as_secs() as f64 * 1_000_000_000.0 +
+                               (now.elapsed().subsec_nanos() as f64)) / 1_000_000.0;
+            }
+
+            if loop_iter > 200  { // just run for one second ow
+                loop_done = true;
+            }
         }
 
         // discharge caps before exiting
         discharge_and_resume(&mut hvcfg, hv_ctl_state, false);
         hvcfg.update_ctl(0, HvLockout::HvGenOff); // leave everything off before exit
+        
+        writeln!(child_stdin, "e").expect("Unable to write to child");
+        s.push_str( "e\n" );
+        writeln!(child_stdin, "{}", s).expect("Unable to write to child"); // overlay the actual voltage over control voltage
+        // println!("{}",s);
         
         process::exit(0);
     } else {
