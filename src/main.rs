@@ -60,8 +60,8 @@ const HV_TOLERANCE: f64 = 5.0; // stop converging when we're within 5V
 const HV_PANIC: f64 = 1150.0; // panic voltage -- shut down the system, we're near breakdown (1.2kV)
 const HV_FIXED_RES: f64 = 6800.0;
 
-const HV_MIN_USER_V: u16 = 150;  // maximum user-requested voltages
-const HV_MAX_USER_V: u16 = 900;
+const HV_MIN_USER_V: u32 = 150;  // maximum user-requested voltages
+const HV_MAX_USER_V: u32 = 900;
 
 fn discharge_and_resume(hvcfg: &mut HvConfig, hv_ctl_state: u8, engage: bool) {
     let caplo_sel: bool = (hv_ctl_state & HvCtl::SelLocap as u8) != 0;
@@ -117,8 +117,10 @@ fn main() {
     let mut PID_KD: f64 = 0.02;
     const PID_Ts: f64 = 0.01;
     const PID_N: f64 = 1.0 / PID_Ts;
-    let mut runtime: u32 = 200;
+    let mut runtime: u32 = 2000; // if you can't zap in 20 seconds, something is wrong??
     let mut max_deltav: u32 = 350;
+    let mut convergence_thresh: f64 = 0.01; // fraction of full scale deviation to be considered converged
+    let mut convergence_dwell: f64 = 500.0;   // time duration for convergence measurement, in ms
 
     let board = board();
     println!("{:?}", board);
@@ -404,7 +406,11 @@ fn main() {
         let mut loop_iter = 0;
         let mut s: String = "".to_string();
         
-        let now = Instant::now();
+        let mut now = Instant::now();
+        let mut conv_begin: f64 = (now.elapsed().as_secs() as f64 * 1_000_000_000.0 +
+                                        (now.elapsed().subsec_nanos() as f64)) / 1_000_000.0;
+        let mut in_conv = false;
+        let mut converged = false;
         while !loop_done {
             e2 = e1;
             e1 = e0;
@@ -453,19 +459,88 @@ fn main() {
                                (now.elapsed().subsec_nanos() as f64)) / 1_000_000.0;
             }
 
-            if loop_iter > runtime  { // just run for one second ow
+            if ((voltage as f64) > (actual_v * (1.0 - convergence_thresh))) &&
+                ((voltage as f64) < (actual_v * (1.0 + convergence_thresh))) {
+                if !in_conv {
+                    in_conv = true;
+                    conv_begin = sample_time;
+                }
+
+                if (sample_time - conv_begin) > convergence_dwell {
+                    converged = true;
+                }
+            } else {
+                in_conv = false;
+            }
+            
+            if converged {
+                loop_done = true;
+            }
+            if loop_iter > runtime  { // cutoff convergence after runtime is exceeded
                 loop_done = true;
             }
         }
-
-        // discharge caps before exiting
-        discharge_and_resume(&mut hvcfg, hv_ctl_state, false);
-        hvcfg.update_ctl(0, HvLockout::HvGenOff); // leave everything off before exit
         
         writeln!(child_stdin, "e").expect("Unable to write to child");
         s.push_str( "e\n" );
         writeln!(child_stdin, "{}", s).expect("Unable to write to child"); // overlay the actual voltage over control voltage
         // println!("{}",s);
+
+        // now trigger the EP event
+        if converged {
+            // connect row/col before engaging HV
+            hvcfg.update_colsel(hv_col_sel_state);
+            hvcfg.update_rowsel(hv_row_sel_state);
+                            
+            // trigger the HV system
+            hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff ); // generator off, caps are charged!
+            // wait 10ms for relay to open before engaging the resistors
+            thread::sleep(time::Duration::from_millis(10));
+            hvcfg.update_ctl( (hv_ctl_state | hv_res_state) & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
+                            
+            // start the ADC sampling here
+            // send the trace data
+            now = Instant::now();
+            let mut s: String = "".to_string();
+            for _ in 0 .. 5000 {
+                // should give elapsed millis
+                let sample_time: f64 = (now.elapsed().as_secs() as f64 * 1_000_000_000.0 +
+                                        (now.elapsed().subsec_nanos() as f64)) / 1_000_000.0;
+                s.push_str( &sample_time.to_string().as_str() );
+                s.push_str( "," );
+                
+                let sample_value: f64 = adc.read_hv();
+                s.push_str( &sample_value.to_string().as_str() );
+                s.push_str( "\n" );
+            }
+            
+            // disengage the row/col
+            hvcfg.update_rowsel(RowSel::RowNone);
+            hvcfg.update_colsel(ColSel::ColNone);
+            
+            // disengage the resistors and relay
+            hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
+            thread::sleep(time::Duration::from_millis(10));
+
+            // setup gnuplot output
+            let mut child2 = Command::new("gnuplot")
+            .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("gnuplot command failed to start");
+            let mut child2_stdin = child2.stdin.take().expect("No stdin found on child");
+            let mut child2_stdout = child2.stdout.take().expect("No stdout found on child");
+        
+            writeln!(child2_stdin, "set terminal png size 800, 1200; set output 'zap.png'; set datafile separator \",\"; plot '-' using 1:2 with lines title 'EP waveform'").expect("Unable to write to child");
+            s.push_str( "e\n" );
+            writeln!(child2_stdin, "{}", s).expect("Unable to write to child"); // overlay the actual voltage over control voltage
+            
+        } else {
+            // discharge caps before exiting
+            discharge_and_resume(&mut hvcfg, hv_ctl_state, false);
+        }
+        
+        hvcfg.update_ctl(0, HvLockout::HvGenOff); // leave everything off before exit
         
         process::exit(0);
     } else {
