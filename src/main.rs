@@ -44,26 +44,24 @@ use std::process;
 use std::process::{Command, Stdio};
 use std::io::{Read, Write};
 
-const HV_FULL_SCALE: f64 = 1000.0;  // set to max V of supply installed: is 1000.0 for production
+const HV_FULL_SCALE: f64 = 1150.0;  // set to max V of supply installed: is 1000.0 for production
 //const HV_GAIN: f64 = ((HV_FULL_SCALE * 1.2) / 12.0); // 20% fudge factor due to low loading
 
 // use HV_GAIN instead of HV_FULL_SCALE / 12.0V, because the supply offsets are substantial
-const HV_GAIN: f64 = 119.0; // empirically derived from measurements, gain factor of DAC->HV output
+const HV_GAIN: f64 = 100.0; // empirically derived from measurements, gain factor of DAC->HV output
 
-const HV_MIN_V: u16 = 120; // minimum voltage, after converter loading effects
-const HV_MIN_SERVO_V: u16 = 120; // minimum servo voltage -- commanded voltage
-const HV_MAX_SERVO_V: f64 = 1100.0; // maximum servo voltage -- commanded voltage
+// loop limits and numbers
+const HV_MIN_V: u16 = 100; // minimum voltage, after converter loading effects
+const HV_MIN_SERVO_V: u16 = 100; // minimum servo voltage -- commanded voltage
+const HV_MAX_SERVO_V: f64 = 1150.0; // maximum servo voltage -- commanded voltage
 const HV_CONVERGENCE: f64 = 0.2;  // convergence rate for HV offset
 const HV_CONVERGENCE_HI_C: f64 = 0.05;  // convergence rate for HV offset
 const HV_TOLERANCE: f64 = 5.0; // stop converging when we're within 5V
 const HV_PANIC: f64 = 1150.0; // panic voltage -- shut down the system, we're near breakdown (1.2kV)
 const HV_FIXED_RES: f64 = 6800.0;
 
-const PID_KP: f64 = 2.0;
-const PID_KI: f64 = 5.0; // 8 @ 10uF, 5 @ 25uF; 5 is more stable, 8 is faster
-const PID_KD: f64 = 0.4;
-const PID_Ts: f64 = 0.01;
-const PID_N: f64 = 1.0 / PID_Ts;
+const HV_MIN_USER_V: u16 = 150;  // maximum user-requested voltages
+const HV_MAX_USER_V: u16 = 900;
 
 fn discharge_and_resume(hvcfg: &mut HvConfig, hv_ctl_state: u8, engage: bool) {
     let caplo_sel: bool = (hv_ctl_state & HvCtl::SelLocap as u8) != 0;
@@ -114,6 +112,14 @@ fn discharge_and_resume(hvcfg: &mut HvConfig, hv_ctl_state: u8, engage: bool) {
 }
 
 fn main() {
+    let mut PID_KP: f64 = 4.0;
+    let mut PID_KI: f64 = 5.5; 
+    let mut PID_KD: f64 = 0.02;
+    const PID_Ts: f64 = 0.01;
+    const PID_N: f64 = 1.0 / PID_Ts;
+    let mut runtime: u32 = 200;
+    let mut max_deltav: u32 = 350;
+
     let board = board();
     println!("{:?}", board);
     
@@ -193,6 +199,31 @@ fn main() {
              .takes_value(true)
              .required(true)
              .conflicts_with("websocket"))
+        .arg(Arg::with_name("KP")
+             .long("kp")
+             .help("Override default KP loop control parameter")
+             .takes_value(true)
+             .conflicts_with("websocket"))
+        .arg(Arg::with_name("KI")
+             .long("ki")
+             .help("Override default KI loop control parameter")
+             .takes_value(true)
+             .conflicts_with("websocket"))
+        .arg(Arg::with_name("KD")
+             .long("kd")
+             .help("Override default KD loop control parameter")
+             .takes_value(true)
+             .conflicts_with("websocket"))
+        .arg(Arg::with_name("runtime")
+             .long("runtime")
+             .help("Set runtime for testing")
+             .takes_value(true)
+             .conflicts_with("websocket"))
+        .arg(Arg::with_name("maxdelta")
+             .long("maxdelta")
+             .help("Set maximum servo delta V over output voltage")
+             .takes_value(true)
+             .conflicts_with("websocket"))
         .arg(Arg::with_name("d")
              .short("d")
              .multiple(true)
@@ -226,10 +257,34 @@ fn main() {
         let mut hv_res_state: u8 = 0;  // intended resistance state -- only engage when HV is disengaged
         let mut hv_row_sel_state: RowSel = RowSel::RowNone;  // row/col sel state -- only engage when HV is disengaged
         let mut hv_col_sel_state: ColSel = ColSel::ColNone;
+
+        if matches.is_present("KP") {
+            PID_KP = matches.value_of("KP").unwrap().parse::<f64>().expect("KP should be a number") as f64;
+            println!("Expert mode KP override = {}", PID_KP);
+        }
+        if matches.is_present("KI") {
+            PID_KI = matches.value_of("KI").unwrap().parse::<f64>().expect("KI should be a number") as f64;
+            println!("Expert mode KI override = {}", PID_KI);
+        }
+        if matches.is_present("KD") {
+            PID_KD = matches.value_of("KD").unwrap().parse::<f64>().expect("KD should be a number") as f64;
+            println!("Expert mode KD override = {}", PID_KD);
+        }
+        if matches.is_present("runtime") {
+            runtime = matches.value_of("runtime").unwrap().parse::<u32>().expect("runtime should be an integer") as u32;
+            println!("Expert mode runtime override = {}", runtime);
+        }
         
         let y_coord: u8 = matches.value_of("row").unwrap().parse::<u32>().expect("Row should be an integer 1-12") as u8;
         let x_coord: u8 = matches.value_of("col").unwrap().parse::<u32>().expect("Column should be an integer 1-4") as u8;
         let voltage: u32 = matches.value_of("volts").unwrap().parse::<u32>().expect("Voltage should be an integer 120-1000");
+
+        if voltage < HV_MIN_USER_V {
+            panic!("Voltage should be bigger than {}", HV_MIN_USER_V);
+        }
+        if voltage > HV_MAX_USER_V {
+            panic!("Voltage should be less than {}", HV_MAX_USER_V);
+        }
 
         let mut res_infinite = true;
         if matches.is_present("resistor values") {
@@ -267,6 +322,23 @@ fn main() {
             }
         }
 
+        if (hv_ctl_state & HvCtl::SelLocap as u8 != 0) && (hv_ctl_state & HvCtl::SelHicap as u8 != 0) {
+            max_deltav = 100;
+        }
+        if (hv_ctl_state & HvCtl::SelLocap as u8 != 0) && (hv_ctl_state & HvCtl::SelHicap as u8 == 0) {
+            max_deltav = 350;
+        }
+        if (hv_ctl_state & HvCtl::SelLocap as u8 == 0) && (hv_ctl_state & HvCtl::SelHicap as u8 != 0) {
+            max_deltav = 200;
+        }
+
+        if matches.is_present("maxdelta") {
+            max_deltav = matches.value_of("maxdelta").unwrap().parse::<u32>().expect("maxdelta should be an integer") as u32;
+            println!("Expert mode runtime override = {}", max_deltav);
+        } else {
+            println!( "Default maxdeltav {}", max_deltav );
+        }
+        
         match y_coord {
             1 => hv_row_sel_state = RowSel::RowSel1,
             2 => hv_row_sel_state = RowSel::RowSel2,
@@ -356,6 +428,9 @@ fn main() {
             if u0 > HV_MAX_SERVO_V as f64 {
                 u0 = HV_MAX_SERVO_V as f64;
             }
+            if u0 > actual_v + max_deltav as f64 {
+                u0 = actual_v + max_deltav as f64;
+            }
             if u0 < HV_MIN_SERVO_V as f64 {
                 u0 = HV_MIN_SERVO_V as f64;
             }
@@ -378,7 +453,7 @@ fn main() {
                                (now.elapsed().subsec_nanos() as f64)) / 1_000_000.0;
             }
 
-            if loop_iter > 200  { // just run for one second ow
+            if loop_iter > runtime  { // just run for one second ow
                 loop_done = true;
             }
         }
