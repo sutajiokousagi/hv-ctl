@@ -131,7 +131,6 @@ fn main() {
     let mut convergence_dwell: f64 = 500.0;   // time duration for convergence measurement, in ms
 
     let board = board();
-    println!("{:?}", board);
     
     let cupi = CuPi::new().unwrap();
 
@@ -139,7 +138,7 @@ fn main() {
     slewrate().unwrap();
 
     // set control state to off/safe
-    println!("Set control state to safe");
+    // println!("Set control state to safe");
     hvcfg.update_ctl(0, HvLockout::HvGenOff);
     hvcfg.update_rowsel(RowSel::RowNone);
     hvcfg.update_colsel(ColSel::ColNone);
@@ -254,8 +253,12 @@ fn main() {
     }
     
     let do_websockets = matches.is_present("websocket");
-    
+
     if !do_websockets {
+        if debug_level > 0 {
+            println!("{:?}", board);
+        }
+    
         let serialize = matches.is_present("serialize outputs");
         let mut timestamp: String = "".to_string();
         if serialize {
@@ -524,6 +527,9 @@ fn main() {
 
         // now trigger the EP event
         if converged {
+            let tau_v = adc.read_hv() * 0.3678;
+            let mut tau_t: f64 = 0.0;
+            
             // connect row/col before engaging HV
             hvcfg.update_colsel(hv_col_sel_state);
             hvcfg.update_rowsel(hv_row_sel_state);
@@ -538,6 +544,7 @@ fn main() {
             // send the trace data
             now = Instant::now();
             let mut s: String = "".to_string();
+            let mut got_tau = false;
             for _ in 0 .. 5000 {
                 // should give elapsed millis
                 let sample_time: f64 = (now.elapsed().as_secs() as f64 * 1_000_000_000.0 +
@@ -548,6 +555,20 @@ fn main() {
                 let sample_value: f64 = adc.read_hv();
                 s.push_str( &sample_value.to_string().as_str() );
                 s.push_str( "\n" );
+                if sample_value <= tau_v && !got_tau {
+                    tau_t = sample_time;
+                    got_tau = true;
+                }
+            }
+
+            if tau_t > 0.0 {
+                if debug_level == 0 {
+                    println!("{}", tau_t);
+                } else {
+                    println!("Zap successful with tau = {}ms.", tau_t);
+                }
+            } else {
+                println!("Zap never converged, tau invalid.");
             }
             
             // disengage the row/col
@@ -600,6 +621,11 @@ fn main() {
         } else {
             // discharge caps before exiting
             discharge_and_resume(&mut hvcfg, hv_ctl_state, false);
+            if debug_level > 0 {
+                println!("Charger error: never converged. Aborting without zap.");
+            }
+            hvcfg.update_ctl(0, HvLockout::HvGenOff); // leave everything off before exit
+            process::exit(1);
         }
         
         hvcfg.update_ctl(0, HvLockout::HvGenOff); // leave everything off before exit
