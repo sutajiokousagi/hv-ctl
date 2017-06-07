@@ -3,6 +3,7 @@ extern crate cupi_shift;
 extern crate spidev;
 extern crate websocket;
 extern crate clap;
+extern crate chrono;
 
 // temporary crates
 extern crate rand;
@@ -43,6 +44,13 @@ use std::process;
 
 use std::process::{Command, Stdio};
 use std::io::{Read, Write};
+
+use chrono::prelude::*;
+
+use std::error::Error;
+use std::io::prelude::*;
+use std::path::Path;
+use std::fs::File;
 
 const HV_FULL_SCALE: f64 = 1150.0;  // set to max V of supply installed: is 1000.0 for production
 //const HV_GAIN: f64 = ((HV_FULL_SCALE * 1.2) / 12.0); // 20% fudge factor due to low loading
@@ -146,7 +154,7 @@ fn main() {
     let mut lv: f64 = 0.6 * ((resistance / HV_FIXED_RES) + 1.0);
 //    let mut hv: f64 = lv * (HV_FULL_SCALE / 12.0); 
     let mut hv: f64 = lv * HV_GAIN; 
-    println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", targetv, code, resistance, lv, hv );
+//    println!("Target {}V. Code set to {}, resistance {}ohms, lv {}V, hv {}V", targetv, code, resistance, lv, hv );
 
     let mut adj_target: f64 = targetv;
     let mut converged: bool = false;
@@ -201,6 +209,12 @@ fn main() {
              .takes_value(true)
              .required(true)
              .conflicts_with("websocket"))
+        .arg(Arg::with_name("serialize outputs")
+             .short("s")
+             .long("serial")
+             .help("Serialize .png and .csv outputs with current date and time in filename")
+             .conflicts_with("websocket"))
+        // below are expert-mode options
         .arg(Arg::with_name("KP")
              .long("kp")
              .help("Override default KP loop control parameter")
@@ -242,6 +256,26 @@ fn main() {
     let do_websockets = matches.is_present("websocket");
     
     if !do_websockets {
+        let serialize = matches.is_present("serialize outputs");
+        let mut timestamp: String = "".to_string();
+        if serialize {
+            let dt = Local::now();
+            timestamp.push_str("_");
+            timestamp.push_str(&*dt.year().to_string());
+            timestamp.push_str("_");
+            timestamp.push_str(&*dt.month().to_string());
+            timestamp.push_str("_");
+            timestamp.push_str(&*dt.day().to_string());
+            timestamp.push_str("_");
+            timestamp.push_str(&*dt.month().to_string());
+            timestamp.push_str("_");
+            timestamp.push_str(&*dt.hour().to_string());
+            timestamp.push_str("_");
+            timestamp.push_str(&*dt.minute().to_string());
+            timestamp.push_str("_");
+            timestamp.push_str(&*dt.second().to_string());
+        }
+
         // setup gnuplot output
         let mut child = Command::new("gnuplot")
             .stdin(Stdio::piped())
@@ -251,7 +285,7 @@ fn main() {
         let mut child_stdin = child.stdin.take().expect("No stdin found on child");
         let mut child_stdout = child.stdout.take().expect("No stdout found on child");
         
-        writeln!(child_stdin, "set terminal png size 800, 1200; set output 'test.png'; set datafile separator \",\"; plot '-' using 1:2 with lines title 'Control', '' using 1:2 with lines title 'Output'").expect("Unable to write to child");
+        writeln!(child_stdin, "set terminal png size 800, 1200; set output 'png/charge{}.png'; set datafile separator \",\"; plot '-' using 1:2 with lines title 'Control', '' using 1:2 with lines title 'Output'", timestamp).expect("Unable to write to child");
         
         // state variables for row, col, control
         let mut hv_ctl_state: u8 = HvCtl::HvgenEna as u8;  // pure control state
@@ -338,7 +372,9 @@ fn main() {
             max_deltav = matches.value_of("maxdelta").unwrap().parse::<u32>().expect("maxdelta should be an integer") as u32;
             println!("Expert mode runtime override = {}", max_deltav);
         } else {
-            println!( "Default maxdeltav {}", max_deltav );
+            if debug_level > 0 {
+                println!( "Default maxdeltav {}", max_deltav );
+            }
         }
         
         match y_coord {
@@ -531,9 +567,35 @@ fn main() {
             let mut child2_stdin = child2.stdin.take().expect("No stdin found on child");
             let mut child2_stdout = child2.stdout.take().expect("No stdout found on child");
         
-            writeln!(child2_stdin, "set terminal png size 800, 1200; set output 'zap.png'; set datafile separator \",\"; plot '-' using 1:2 with lines title 'EP waveform'").expect("Unable to write to child");
+            writeln!(child2_stdin, "set terminal png size 800, 1200; set output 'png/zap{}.png'; set datafile separator \",\"; plot '-' using 1:2 with lines title 'EP waveform'", timestamp).expect("Unable to write to child");
             s.push_str( "e\n" );
             writeln!(child2_stdin, "{}", s).expect("Unable to write to child"); // overlay the actual voltage over control voltage
+
+            let mut filename: String = "csv/zap".to_string();
+            filename.push_str(&*timestamp);
+            filename.push_str(".csv");
+            let path = Path::new(&*filename);
+            let display = path.display();
+
+            // Open a file in write-only mode, returns `io::Result<File>`
+            let mut file = match File::create(&path) {
+                Err(why) => panic!("couldn't create {}: {}",
+                                   display,
+                                   why.description()),
+                Ok(file) => file,
+            };
+
+            match file.write_all(s.as_bytes()) {
+                Err(why) => {
+                    panic!("couldn't write to {}: {}", display,
+                           why.description())
+                },
+                Ok(_) => {
+                    if debug_level > 0 {
+                        println!("Wrote CSV output to {}", display)
+                    }
+                },
+            }
             
         } else {
             // discharge caps before exiting
