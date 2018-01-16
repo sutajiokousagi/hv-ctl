@@ -243,6 +243,10 @@ fn main() {
              .short("d")
              .multiple(true)
              .help("Set debug verbosity level"))
+        .arg(Arg::with_name("pulse")
+             .long("pulse")
+             .help("Experimental pulse-based zap")
+             .conflicts_with("websocket"))
         .get_matches();
 
     let mut debug_level = 0;
@@ -250,6 +254,11 @@ fn main() {
         0 => debug_level = 0,
         1 => debug_level = 1,
         2 | _ => debug_level = 2,
+    }
+
+    let pulse_special = matches.is_present("pulse");
+    if pulse_special {
+        println!("Inovked with special pulse testing mode");
     }
     
     let do_websockets = matches.is_present("websocket");
@@ -538,12 +547,15 @@ fn main() {
             hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff ); // generator off, caps are charged!
             // wait 10ms for relay to open before engaging the resistors
             thread::sleep(time::Duration::from_millis(10));
+
+            // engage the resistors
             hvcfg.update_ctl( (hv_ctl_state | hv_res_state) & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
                             
             // start the ADC sampling here
             // send the trace data
             now = Instant::now();
             let mut s: String = "".to_string();
+            let mut did_pulse = false;
             let mut got_tau = false;
             for _ in 0 .. 5000 {
                 // should give elapsed millis
@@ -558,6 +570,18 @@ fn main() {
                 if sample_value <= tau_v && !got_tau {
                     tau_t = sample_time;
                     got_tau = true;
+                }
+                if pulse_special {
+                    if sample_time > 20.0 && !did_pulse {
+                        did_pulse = true;
+                        // discharge caps
+                        hvcfg.update_ctl( (hv_ctl_state | HvCtl::Sel300Ohm as u8 |
+                                           HvCtl::Sel620Ohm as u8 | HvCtl::Sel750Ohm as u8 |
+                                           HvCtl::Sel1000Ohm as u8) & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
+                        // deselect row/col
+                        hvcfg.update_rowsel(RowSel::RowNone);
+                        hvcfg.update_colsel(ColSel::ColNone);
+                    }
                 }
             }
 
