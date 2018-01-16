@@ -129,6 +129,7 @@ fn main() {
     let mut max_deltav: u32 = 350;
     let mut convergence_thresh: f64 = 0.01; // fraction of full scale deviation to be considered converged
     let mut convergence_dwell: f64 = 500.0;   // time duration for convergence measurement, in ms
+    let mut pulsetime: f64 = 5.0;  // default pulse time in ms
 
     let board = board();
     
@@ -243,6 +244,11 @@ fn main() {
              .short("d")
              .multiple(true)
              .help("Set debug verbosity level"))
+        .arg(Arg::with_name("pulse")
+             .long("pulse")
+             .help("Experimental pulse-based zap, requires argument in ms for pulse length")
+             .takes_value(true)
+             .conflicts_with("websocket"))
         .get_matches();
 
     let mut debug_level = 0;
@@ -250,6 +256,12 @@ fn main() {
         0 => debug_level = 0,
         1 => debug_level = 1,
         2 | _ => debug_level = 2,
+    }
+
+    let pulse_special = matches.is_present("pulse");
+    if pulse_special {
+        pulsetime = matches.value_of("pulse").unwrap().parse::<f64>().expect("runtime should be a float") as f64;
+        println!("Invoked with special pulse testing mode, duration = {}ms", pulsetime);
     }
     
     let do_websockets = matches.is_present("websocket");
@@ -527,58 +539,134 @@ fn main() {
 
         // now trigger the EP event
         if converged {
-            let tau_v = adc.read_hv() * 0.3678;
-            let mut tau_t: f64 = 0.0;
+            let mut s: String = "".to_string();  // storage for gnuplot
             
-            // connect row/col before engaging HV
-            hvcfg.update_colsel(hv_col_sel_state);
-            hvcfg.update_rowsel(hv_row_sel_state);
-                            
-            // trigger the HV system
-            hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff ); // generator off, caps are charged!
-            // wait 10ms for relay to open before engaging the resistors
-            thread::sleep(time::Duration::from_millis(10));
-            hvcfg.update_ctl( (hv_ctl_state | hv_res_state) & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
-                            
-            // start the ADC sampling here
-            // send the trace data
-            now = Instant::now();
-            let mut s: String = "".to_string();
-            let mut got_tau = false;
-            for _ in 0 .. 5000 {
-                // should give elapsed millis
-                let sample_time: f64 = (now.elapsed().as_secs() as f64 * 1_000_000_000.0 +
-                                        (now.elapsed().subsec_nanos() as f64)) / 1_000_000.0;
-                s.push_str( &sample_time.to_string().as_str() );
-                s.push_str( "," );
+            if pulse_special {
+                let mut tau_t: f64 = 0.0;
+            
+                // disconnect the generator to prevent putting resistive load before engaging HV
+                hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff ); // generator off, caps are charged!
                 
-                let sample_value: f64 = adc.read_hv();
-                s.push_str( &sample_value.to_string().as_str() );
-                s.push_str( "\n" );
-                if sample_value <= tau_v && !got_tau {
-                    tau_t = sample_time;
-                    got_tau = true;
-                }
-            }
+                // wait 5ms for relay to debounce before engaging the resistors
+                thread::sleep(time::Duration::from_millis(5));
 
-            if tau_t > 0.0 {
-                if debug_level == 0 {
-                    println!("{}", tau_t);
+                let mut triggered = false;
+                            
+                // start the ADC sampling here
+                // send the trace data
+                now = Instant::now();
+                let mut got_tau = false;
+                for _ in 0 .. 5000 {
+                    // should give elapsed millis
+                    let sample_time: f64 = (now.elapsed().as_secs() as f64 * 1_000_000_000.0 +
+                                            (now.elapsed().subsec_nanos() as f64)) / 1_000_000.0;
+                    s.push_str( &sample_time.to_string().as_str() );
+                    s.push_str( "," );
+                    
+                    let sample_value: f64 = adc.read_hv();
+                    s.push_str( &sample_value.to_string().as_str() );
+                    s.push_str( "\n" );
+                    
+                    if( !triggered ) {
+                        // connect row/col, then engage resistors 
+                        hvcfg.update_colsel(hv_col_sel_state);
+                        hvcfg.update_rowsel(hv_row_sel_state);
+                
+                        triggered = true;
+                    }
+                    if( (sample_time > pulsetime) && !got_tau ) {
+                        // disengage the row/col at the pulsetime
+                        hvcfg.update_rowsel(RowSel::RowNone);
+                        hvcfg.update_colsel(ColSel::ColNone);
+                        tau_t = sample_time;
+                        got_tau = true;
+
+                        // col/row disconnected, so discharge caps via resistors
+                        // don't discharge so we can see the discharge curve caused by the well compared to the retention of the capacitor
+                        // hvcfg.update_ctl( (hv_ctl_state | HvCtl::Sel300Ohm as u8 | HvCtl::Sel620Ohm as u8 | HvCtl::Sel750Ohm as u8 | HvCtl::Sel1000Ohm as u8)
+                        //                    & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
+                    }
+                }
+
+                discharge_and_resume(&mut hvcfg, hv_ctl_state, false);
+                
+                if tau_t > 0.0 {
+                    if debug_level == 0 {
+                        println!("{}", tau_t);
+                    } else {
+                        println!("Zap successful with tau = {}ms.", tau_t);
+                    }
                 } else {
-                    println!("Zap successful with tau = {}ms.", tau_t);
+                    println!("Zap never converged, tau invalid.");
                 }
+            
+                // should already be done, but just in case: disengage the resistors and relay
+                hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
+                thread::sleep(time::Duration::from_millis(10));
             } else {
-                println!("Zap never converged, tau invalid.");
-            }
+                let tau_v = adc.read_hv() * 0.3678;
+                let mut tau_t: f64 = 0.0;
             
-            // disengage the row/col
-            hvcfg.update_rowsel(RowSel::RowNone);
-            hvcfg.update_colsel(ColSel::ColNone);
-            
-            // disengage the resistors and relay
-            hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
-            thread::sleep(time::Duration::from_millis(10));
+                // disconnect the generator to prevent putting resistive load before engaging HV
+                hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff ); // generator off, caps are charged!
+                
+                // wait 5ms for relay to debounce before engaging the resistors
+                thread::sleep(time::Duration::from_millis(5));
 
+                let mut triggered = false;
+                            
+                // start the ADC sampling here
+                // send the trace data
+                now = Instant::now();
+                let mut got_tau = false;
+                for _ in 0 .. 5000 {
+                    // should give elapsed millis
+                    let sample_time: f64 = (now.elapsed().as_secs() as f64 * 1_000_000_000.0 +
+                                            (now.elapsed().subsec_nanos() as f64)) / 1_000_000.0;
+                    s.push_str( &sample_time.to_string().as_str() );
+                    s.push_str( "," );
+                    
+                    let sample_value: f64 = adc.read_hv();
+                    s.push_str( &sample_value.to_string().as_str() );
+                    s.push_str( "\n" );
+                    if sample_value <= tau_v && !got_tau {
+                        tau_t = sample_time;
+                        got_tau = true;
+                    }
+                    
+                    if( !triggered ) {
+                        // connect row/col, then engage resistors 
+                        hvcfg.update_colsel(hv_col_sel_state);
+                        hvcfg.update_rowsel(hv_row_sel_state);
+                
+                        // engage resistors
+                        hvcfg.update_ctl( (hv_ctl_state | hv_res_state) & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
+                        triggered = true;
+                    }
+                }
+
+                if tau_t > 0.0 {
+                    if debug_level == 0 {
+                        println!("{}", tau_t);
+                    } else {
+                        println!("Zap successful with tau = {}ms.", tau_t);
+                    }
+                } else {
+                    println!("Zap never converged, tau invalid.");
+                }
+            
+                // disengage the row/col
+                hvcfg.update_rowsel(RowSel::RowNone);
+                hvcfg.update_colsel(ColSel::ColNone);
+            
+                // disengage the resistors and relay
+                hvcfg.update_ctl( hv_ctl_state & !(HvCtl::HvEngage as u8), HvLockout::HvGenOff );
+                thread::sleep(time::Duration::from_millis(10));
+            }
+
+            // discharge caps now that the loop is done, as a matter of safety
+            discharge_and_resume(&mut hvcfg, hv_ctl_state, false);
+            
             // setup gnuplot output
             let mut child2 = Command::new("gnuplot")
             .stdin(Stdio::piped())
@@ -618,7 +706,7 @@ fn main() {
                 },
             }
             
-        } else {
+        } else {  // didn't converge
             // discharge caps before exiting
             discharge_and_resume(&mut hvcfg, hv_ctl_state, false);
             if debug_level > 0 {
